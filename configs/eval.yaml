@@ -1,0 +1,26 @@
+model:
+  name: unet
+  params:
+    in_ch: 2
+    out_ch: 1
+    base: 32
+
+data:
+  # 本地无数据：先用 Dummy
+  use_dummy: true
+  dummy_length: 16
+  dummy_H: 256
+  dummy_W: 384
+  batch_size: 2
+
+  #  use_dummy: false 真实路径
+  root_noisy: /data/shared_folder/projectionsNoisy
+  root_clean: /data/shared_folder/projectionsNoisy
+  ids: [0]
+  truncate_left: 350
+  truncate_right: 350
+  normalize: percentile
+
+eval:
+  device: cuda
+  ckpt: ""   # 训练出的权重路径 /path/to/checkpoints/unet_epoch2.pth

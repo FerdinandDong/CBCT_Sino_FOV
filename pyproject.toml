@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ct-proj-fix"
+version = "0.1.0"
+description = "CT projection truncation+noise repair; UNet baseline + diffusion"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy",
+  "imageio>=2.30",
+  "tqdm",
+  "matplotlib",
+  "scipy"
+  # torch/torchvision CUDA 环境单独安装，不放这里
+]
+
+[tool.setuptools.packages.find]
+# 仅打包 ctprojfix 及其子模块，排除其他顶层目录
+include = ["ctprojfix*"]
+exclude = ["configs*", "scripts*", "tests*", "examples*"]

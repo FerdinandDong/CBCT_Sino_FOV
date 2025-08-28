@@ -1,0 +1,5 @@
+numpy
+imageio>=2.30
+tqdm
+matplotlib
+scipy

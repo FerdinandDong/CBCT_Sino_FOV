@@ -1,0 +1,23 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# 虚拟环境
+.venv/
+env/
+venv/
+
+# 数据/输出/权重
+/data_shared/
+/data/
+/outputs/
+/checkpoints/
+/wandb/
+*.tif
+*.tiff
+*.png
+*.jpg
+*.gif
+*.mp4
+*.pth
+*.ckpt
