@@ -1,12 +1,11 @@
 README.md
 pyproject.toml
 setup.py
-ct_proj_fix.egg-info/PKG-INFO
-ct_proj_fix.egg-info/SOURCES.txt
-ct_proj_fix.egg-info/dependency_links.txt
-ct_proj_fix.egg-info/requires.txt
-ct_proj_fix.egg-info/top_level.txt
 ctprojfix/__init__.py
+ctprojfix.egg-info/PKG-INFO
+ctprojfix.egg-info/SOURCES.txt
+ctprojfix.egg-info/dependency_links.txt
+ctprojfix.egg-info/top_level.txt
 ctprojfix/data/__init__.py
 ctprojfix/data/dataset.py
 ctprojfix/evals/__init__.py
