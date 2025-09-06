@@ -6,7 +6,8 @@ model:
 
 data:
   # 先用 Dummy 本地空跑；连服务器后设 false + 填真实路径
-  use_dummy: true
+  # use_dummy: true
+  use_dummy: false
   dummy_length: 16
   dummy_H: 256
   dummy_W: 384
@@ -35,4 +36,4 @@ train:
   #checkpoint
   ckpt_dir: checkpoints/diffusion
   save_every: 1
-  max_keep: 5
+  max_keep: 2

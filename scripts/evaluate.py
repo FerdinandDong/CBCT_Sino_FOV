@@ -1,8 +1,10 @@
-# scripts/evaluate.py
-import argparse, yaml, os
+import argparse, yaml, os, csv
 import numpy as np
 import torch
 from tqdm import tqdm
+import matplotlib
+matplotlib.use("Agg")  # 服务器无显示环境时避免卡住
+import matplotlib.pyplot as plt
 
 # 触发模型注册
 import ctprojfix.models.unet
@@ -10,20 +12,38 @@ from ctprojfix.models.registry import build_model
 from ctprojfix.data.dataset import make_dataloader, DummyDataset
 from ctprojfix.evals.metrics import psnr, ssim
 
+
 def load_cfg(path):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
+
 def load_checkpoint(model, ckpt_path, device):
     if not ckpt_path or not os.path.isfile(ckpt_path):
-        print(f"[INFO] 未提供有效权重路径，使用随机初始化模型进行评估（仅用于测试流程检查）: {ckpt_path}")
+        print(f"[INFO] 未提供有效权重路径，使用随机初始化模型进行评估（仅用于流程检查）: {ckpt_path}")
         return model
     ckpt = torch.load(ckpt_path, map_location=device)
-    # 兼容直接保存 state_dict 或包含 "state_dict"
     state = ckpt.get("state_dict", ckpt)
     model.load_state_dict(state, strict=False)
     print(f"[OK] 已加载权重: {ckpt_path}")
     return model
+
+
+def save_triptych(noisy, pred, gt, out_path, title=None):
+    """保存三联图 + 误差图"""
+    fig, axes = plt.subplots(1, 4, figsize=(14, 4))
+    axes[0].imshow(noisy, cmap="gray"); axes[0].set_title("Noisy"); axes[0].axis("off")
+    axes[1].imshow(pred,  cmap="gray"); axes[1].set_title("Pred");  axes[1].axis("off")
+    axes[2].imshow(gt,    cmap="gray"); axes[2].set_title("GT");    axes[2].axis("off")
+    err = np.abs(pred - gt)
+    im = axes[3].imshow(err, cmap="magma"); axes[3].set_title("|Pred-GT|"); axes[3].axis("off")
+    fig.colorbar(im, ax=axes[3], fraction=0.046, pad=0.04)
+    if title: fig.suptitle(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[FIG] {out_path}")
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -31,10 +51,11 @@ def main():
     args = ap.parse_args()
     cfg = load_cfg(args.cfg)
 
-    # 构建模型
     device = torch.device(cfg["eval"].get("device", "cuda") if torch.cuda.is_available() else "cpu")
-    model  = build_model(cfg["model"]["name"], **cfg["model"]["params"]).to(device)
-    model  = load_checkpoint(model, cfg["eval"].get("ckpt", ""), device)
+
+    # 模型
+    model = build_model(cfg["model"]["name"], **cfg["model"]["params"]).to(device)
+    model = load_checkpoint(model, cfg["eval"].get("ckpt", ""), device)
     model.eval()
 
     # 数据
@@ -51,25 +72,74 @@ def main():
         from torch.utils.data import DataLoader
         loader = DataLoader(dummy, batch_size=cfg["data"].get("batch_size", 1), shuffle=False, num_workers=0)
 
-    # 评估循环
-    psnrs, ssim_list = [], []
-    with torch.no_grad():
-        for batch in tqdm(loader, desc="Eval"):
-            x = batch["inp"].to(device)  # (B,2,H,W)
-            y = batch["gt"].to(device)   # (B,1,H,W)
-            pred = model(x)
+    # 输出
+    save_dir = cfg["eval"].get("out_dir", "outputs/unet")
+    os.makedirs(save_dir, exist_ok=True)
+    trip_dir = os.path.join(save_dir, "figs")
+    os.makedirs(trip_dir, exist_ok=True)
+    csv_path = os.path.join(save_dir, "metrics.csv")
 
-            # 转成 numpy(0-1) 计算指标
-            pred_np = pred.detach().cpu().numpy()
-            gt_np   = y.detach().cpu().numpy()
-            # 按 batch 求平均
-            for i in range(pred_np.shape[0]):
-                p = np.squeeze(pred_np[i], axis=0)  # (H,W)
-                g = np.squeeze(gt_np[i],   axis=0)  # (H,W)
-                psnrs.append(psnr(p, g, data_range=1.0))
-                ssim_list.append(ssim(p, g, data_range=1.0))
+    # 选择展示索引（第几张保存三联图）
+    show_idx = cfg["eval"].get("show_idx", "mid")
+    total = len(loader.dataset)
+    if isinstance(show_idx, str) and show_idx.lower() == "mid":
+        show_idx = total // 2
+    else:
+        show_idx = int(show_idx)
 
-    print(f"[RESULT] PSNR: {np.mean(psnrs):.3f} dB  |  SSIM: {np.mean(ssim_list):.4f}  (N={len(psnrs)})")
+    # 评估
+    psnrs, ssims = [], []
+    img_count = 0
+
+    # 写 CSV 头
+    with open(csv_path, "w", newline="") as fcsv:
+        writer = csv.writer(fcsv)
+        writer.writerow(["idx", "id", "angle", "PSNR", "SSIM"])
+
+        with torch.no_grad():
+            for batch in tqdm(loader, desc="Eval"):
+                x = batch["inp"].to(device)  # (B,2,H,W) -> noisy=x[:,0], mask=x[:,1]
+                y = batch["gt"].to(device)   # (B,1,H,W)
+                pred = model(x)
+
+                pred_np = pred.detach().cpu().numpy()
+                gt_np   = y.detach().cpu().numpy()
+                noisy_np= x[:,0:1].detach().cpu().numpy()  # (B,1,H,W)
+
+                for i in range(pred_np.shape[0]):
+                    p = np.squeeze(pred_np[i], 0)   # (H,W)
+                    g = np.squeeze(gt_np[i], 0)
+                    n = np.squeeze(noisy_np[i], 0)
+
+                    # clip 到 [0,1] 以确保指标一致
+                    p = np.clip(p, 0.0, 1.0)
+                    g = np.clip(g, 0.0, 1.0)
+                    n = np.clip(n, 0.0, 1.0)
+
+                    cur_psnr = psnr(p, g, data_range=1.0)
+                    cur_ssim = ssim(p, g, data_range=1.0)
+                    psnrs.append(cur_psnr); ssims.append(cur_ssim)
+
+                    # 记录 csv
+                    id_str = str(batch.get("id", ["?"])[0]) if isinstance(batch.get("id"), list) else str(batch.get("id", "?"))
+                    angle  = int(batch.get("angle", torch.tensor(-1))[i].item()) if "angle" in batch else -1
+                    writer.writerow([img_count, id_str, angle, f"{cur_psnr:.4f}", f"{cur_ssim:.4f}"])
+
+                    # 保存单张图（可选）
+                    plt.imsave(os.path.join(save_dir, f"pred_{img_count:05d}.png"), p, cmap="gray")
+                    plt.imsave(os.path.join(save_dir, f"gt_{img_count:05d}.png"),   g, cmap="gray")
+                    plt.imsave(os.path.join(save_dir, f"noisy_{img_count:05d}.png"),n, cmap="gray")
+
+                    # 保存一张三联+误差
+                    if img_count == show_idx:
+                        save_triptych(n, p, g, os.path.join(trip_dir, f"triptych_{img_count:05d}.png"),
+                                      title=f"id={id_str}, angle={angle}, idx={img_count}")
+
+                    img_count += 1
+
+    print(f"[RESULT] PSNR: {np.mean(psnrs):.3f} dB  |  SSIM: {np.mean(ssims):.4f}  (N={len(psnrs)})")
+    print(f"[OK] 结果保存目录：{save_dir}\n[OK] 指标 CSV：{csv_path}")
+
 
 if __name__ == "__main__":
     main()

@@ -55,3 +55,6 @@ def run_sampling(model, noisy, mask,
         x = data_consistency(x, noisy, mask, mode=dc_mode, alpha=dc_alpha)
 
     return x
+
+#给采样器加 DDIM + AMP + dc_every 可以加速
+

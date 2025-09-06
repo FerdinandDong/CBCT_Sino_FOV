@@ -5,7 +5,8 @@ model:
     base: 32
 
 data:
-  use_dummy: true          # 本地演示：Dummy 数据集
+  # use_dummy: true          # 本地演示：Dummy 数据集
+  use_dummy: false       # 服务器跑：真实数据集          
   dummy_length: 4
   dummy_H: 256
   dummy_W: 384
@@ -17,6 +18,7 @@ data:
   ids: [0]
   step: 1
   downsample: 1
+  
   truncate_left: 350
   truncate_right: 350
   mask_mode: fixed

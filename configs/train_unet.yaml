@@ -6,7 +6,8 @@ model:
     base: 32
 
 data:
-  use_dummy: true        # 本地没有数据时 测试空转
+  # use_dummy: true        # 本地没有数据时 测试空转
+  use_dummy: false      # 实际数据
   dummy_length: 16       # 迭代样本个数
   dummy_H: 256
   dummy_W: 384
