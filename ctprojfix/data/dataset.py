@@ -64,7 +64,9 @@ class DummyDataset(Dataset):
     """
     没有真实数据时用的占位数据集：随机张量，尺寸与通道和 mask 规则一致。
     """
-    def __init__(self, length=8, H=256, W=384, truncate_left=64, truncate_right=64):
+    def __init__(self, length=8, H=256, W=384, truncate_left=64, truncate_right=64, add_angle_channel=False):
+        
+        self.add_angle = add_angle_channel
         self.length = int(length)
         self.H = int(H); self.W = int(W)
         self.truncate_left = int(truncate_left); self.truncate_right = int(truncate_right)

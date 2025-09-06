@@ -36,7 +36,7 @@ data:
 
 train:
   device: cuda
-  epochs: 2
+  epochs: 10
   lr: 3e-4
 
   ckpt_dir: checkpoints

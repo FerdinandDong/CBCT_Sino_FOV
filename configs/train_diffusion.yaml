@@ -1,0 +1,38 @@
+model:
+  name: diffusion
+  params:
+    add_angle_channel: true
+    base: 32
+
+data:
+  # 先用 Dummy 本地空跑；连服务器后设 false + 填真实路径
+  use_dummy: true
+  dummy_length: 16
+  dummy_H: 256
+  dummy_W: 384
+  batch_size: 2
+
+  root_noisy: /data/shared_folder/projectionsNoisy
+  root_clean: /data/shared_folder/projectionsNoisy
+  ids: [0]
+  step: 1
+  downsample: 1
+  truncate_left: 350
+  truncate_right: 350
+  mask_mode: fixed
+  normalize: percentile
+  add_angle_channel: true
+
+train:
+  device: cuda
+  epochs: 10
+  lr: 1e-4
+  # DDPM 超参
+  T: 1000
+  beta_start: 1e-4
+  beta_end: 2e-2
+  dc_strength: 1.0
+  #checkpoint
+  ckpt_dir: checkpoints/diffusion
+  save_every: 1
+  max_keep: 5

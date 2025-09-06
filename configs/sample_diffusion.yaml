@@ -1,0 +1,33 @@
+model:
+  name: diffusion
+  params:
+    add_angle_channel: true
+    base: 32
+
+data:
+  use_dummy: true          # 本地演示：Dummy 数据集
+  dummy_length: 4
+  dummy_H: 256
+  dummy_W: 384
+  batch_size: 2
+  add_angle_channel: true
+
+  root_noisy: /data/shared_folder/projectionsNoisy
+  root_clean: /data/shared_folder/projectionsNoisy
+  ids: [0]
+  step: 1
+  downsample: 1
+  truncate_left: 350
+  truncate_right: 350
+  mask_mode: fixed
+  normalize: percentile
+
+sample:
+  device: cuda
+  ckpt: checkpoints/diffusion/DDPM_epoch10.pth   # 训练好的权重
+  T: 200
+  beta_start: 1.0e-4
+  beta_end: 2.0e-2
+  dc_mode: "hard"
+  dc_alpha: 0.5
+  out_dir: outputs/sample
