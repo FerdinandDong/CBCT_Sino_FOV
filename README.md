@@ -29,6 +29,67 @@ CBCT_Sino_FOV/
 └─ README.md
 ```
 
+
+
+```mermaid
+  flowchart LR
+    %% ====== 前向扩散 q(x_t | x_{t-1}) ======
+    subgraph Forward["前向扩散（加噪） q(x_t | x_{t-1})"]
+      X0[干净图像 x₀] -->|t=1| X1[x₁ = √(1-β₁)·x₀ + √(β₁)·ε]
+      X1 -->|t=2| X2[x₂ = √(1-β₂)·x₁ + √(β₂)·ε]
+      Xdot[⋯] -->|…| XT[x_T ≈ N(0, I)]
+      X2 --> Xdot
+    end
+
+    %% ====== 训练：预测噪声 ε ======
+    subgraph Train["训练：噪声预测网络 ε̂_θ(x_t, t | 条件)"]
+      TInput1[x_t] --> Net((UNet/ResUNet))
+      TInput2[t（时间步）] --> Net
+      TCond[条件（如 noisy 中心 + mask + angle）] --> Net
+      Net --> EpsHat[ε̂_θ]
+      Loss[[L = ‖ε - ε̂_θ‖²]]
+    end
+
+    %% ====== 反向生成 p_θ(x_{t-1} | x_t) ======
+    subgraph Reverse["反向扩散（去噪生成） p_θ(x_{t-1} | x_t)"]
+      ZT[随机噪声 x_T ~ N(0, I)] -->|t=T| Rt[μ_θ(x_t,t,cond) + σ_t·z]
+      Rt -->|t=T-1| Rt1[μ_θ(x_{t-1},t-1,cond) + σ_{t-1}·z]
+      Rt1 --> Rdot[⋯]
+      Rdot --> R1[x₁]
+      R1 --> R0[生成样本 x₀]
+    end
+
+    %% DC 强一致性（可选）
+    subgraph DC["数据一致性（可选，每步）"]
+      DCmask[mask：1=中心有效区, 0=截断区]
+      Obs[观测中心 obs（noisy）]
+      Rule["hard: x ← obs⊙mask + x⊙(1-mask)\nsoft: x ← α·obs⊙mask + (1-α)·x⊙mask + x⊙(1-mask)"]
+    end
+
+    %% 连接
+    XT --> Train
+    EpsHat --> Loss
+    ZT --> Reverse
+    DCmask -.-> Reverse
+    Obs -.-> Reverse
+    Rule -.-> Reverse
+
+    %% 样式
+    classDef gray fill:#f6f6f6,stroke:#aaa,stroke-width:1px,color:#333;
+    classDef blue fill:#e8f3ff,stroke:#5b8ff9,stroke-width:1px,color:#0b5cad;
+    classDef green fill:#ebfff1,stroke:#34c759,stroke-width:1px,color:#0a6b2b;
+    class Forward gray
+    class Train blue
+    class Reverse green
+    class DC gray
+
+
+```
+
+
+
+
+
 ---
 
 ### 2025-09-07
