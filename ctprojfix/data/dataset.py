@@ -138,7 +138,7 @@ class ProjectionAnglesDataset(Dataset):
         self.cache_noisy = {}
         self.cache_clean = {}
         
-        print(f"[DATA] id={id_}: ds={self.downsample} => L_eff={L_eff}, R_eff={R_eff}, W_ds={self.meta[id_]['W']}")
+
 
 
     def __len__(self):
