@@ -7,12 +7,14 @@ __pycache__/
 env/
 venv/
 
-# 数据/输出/权重
+# 数据/输出/权重/logs
 /data_shared/
 /data/
 /outputs/
 /checkpoints/
 /wandb/
+/logs/
+*.log
 *.tif
 *.tiff
 *.png
