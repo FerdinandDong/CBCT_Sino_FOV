@@ -40,7 +40,7 @@ def apply_dc(x_t, obs_center, mask, mode="hard", alpha=0.5):
     x_t, obs_center, mask: (B,1,H,W)
     mode: "hard" | "soft"
     """
-    # --- 安全检查 ---
+    # check
     assert mask.shape == x_t.shape, "[DC] mask/生成尺寸不一致"
     assert torch.sum(mask) > 0, "[DC] mask 全 0，请检查 downsample 与 truncate_left/right 是否匹配"
 
