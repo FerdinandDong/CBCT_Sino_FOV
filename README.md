@@ -85,63 +85,7 @@ CBCT_Sino_FOV/
 ├─ pyproject.toml            # setuptools 可编辑安装（仅打包 ctprojfix）
 └─ README.md                 # 本文件（实验思路 + 日志）
 ```
-## 当前代码结构（2025-09-07）
 
-```
-CBCT_Sino_FOV/
-├─ checkpoints/ # 权重保存
-│ └─ diffusion/
-├─ configs/ # 训练 & 采样配置
-├─ ctprojfix/ # 核心库
-│ ├─ data/ # 数据集定义 (Dummy + ProjectionAnglesDataset)
-│ ├─ evals/ # 指标 (PSNR/SSIM)
-│ ├─ losses/ # 损失函数 (L1/L2/SSIM/频域可扩展)
-│ ├─ models/
-│ │ ├─ unet.py # UNet baseline
-│ │ ├─ unet_res.py # ResNet-UNet 扩展版
-│ │ └─ diffusion/ # 扩散模型 (DDPM, Sampler)
-│ ├─ recon/ # 预留: FBP/FDK 重建
-│ ├─ trainers/ # 训练循环 (SupervisedTrainer / DiffusionTrainer)
-│ └─ utils/ # 工具函数 (IO, logging, mask 构造等)
-├─ outputs/ # 输出目录
-│ └─ sample/ # 采样可视化结果
-├─ scripts/ # 可执行脚本
-│ ├─ train.py # 统一训练入口
-│ ├─ evaluate.py # 统一评估入口
-│ └─ sample_diffusion.py # 扩散采样入口 (含 DC)
-├─ tests/ # 单元测试 (预留)
-├─ requirements.txt
-├─ setup.py
-├─ pyproject.toml
-└─ README.md
-```
-
----
-
-### 2025-09-07
-- **加入扩散模型 (Diffusion/DDPM)**：
-  - 新增目录 `ctprojfix/models/diffusion/`，实现 `ddpm.py` 与 `sampler.py`
-  - 新增 `ctprojfix/trainers/diffusion.py`，实现 **DiffusionTrainer**
-  - 支持条件输入 `[noisy, mask, (angle)]`，可扩展 angle channel
-- **训练**：
-  - `configs/train_diffusion.yaml` 配置，支持 T/beta_start/beta_end 等超参
-  - 服务器上实际数据集可跑通（逐角度帧，batch 维度稳定）
-  - 实现 checkpoint 循环保存（max_keep 保留最近若干）
-- **采样**：
-  - 新增 `scripts/sample_diffusion.py`：
-    - 实现 DDPM 逆扩散流程
-    - 集成 **数据一致性 (DC)** 硬/软模式
-    - 输出 `pred/noisy/mask/(gt)` PNG
-    - 加入安全检查：
-      - `assert mask.sum() > 0`（防止全零）
-      - `assert mask.shape == x_t.shape`（防止尺寸错位）
-  - 解决了 **downsample ≠ 1 时 mask 与中心模糊** 的 bug（mask L/R 按 downsample 缩放）
-- **评估与可视化**：
-  - UNet/Diffusion 均支持 `evaluate.py` 或 `sample_diffusion.py` 跑通
-  - 输出样例图片，支持 Dummy 流程验证
-- **训练/采样一致性**：
-  - 注意 `downsample` 必须与训练配置一致，否则中心区域会被 DC 覆盖模糊
-  - 已在代码中补丁，保证 mask 缩放匹配
 ---
 
 ## 目标结构（规划 & 可插拔）
@@ -193,5 +137,22 @@ python scripts/evaluate.py --cfg configs/eval.yaml
 - Windows 下读取 YAML 建议：`open(..., encoding="utf-8")`（已在脚本中处理）服务器Linux似乎需要更改,检查一下
 - 大文件/权重/图片/视频已在 `.gitignore` 中忽略，避免误传仓库
 - Torch/CUDA 建议按各自平台单独安装（未写入 `pyproject.toml` 依赖）
+
+---
+
+## References
+
+本项目的模型设计与数据结构主要参考以下文献：
+
+1. **Ho, J., Jain, A., & Abbeel, P. (2020).**  
+   *Denoising Diffusion Probabilistic Models*.  
+   Advances in Neural Information Processing Systems (NeurIPS), 33, 6840-6851.  
+    提出了 DDPM 框架，是本项目中 `ctprojfix/models/diffusion/ddpm.py` 的理论基础。
+
+2. **Maier, A. K., Hofmann, H. G., Berger, M., Fischer, B., Schwemmer, C., Wu, H., Hornegger, J., … Kalender, W. A. (2013).**  
+   *CONRAD — A software framework for cone-beam imaging in radiology*.  
+   Medical Physics, 40(11), 111914.  
+    提供了 CBCT 投影与重建的系统框架，尤其涉及截断/噪声建模与 FOV 扩展，是本项目中  
+   `ctprojfix/data/dataset.py`（ProjectionAnglesDataset 与截断 mask 设计）的参考依据。
 
 ---
