@@ -2,7 +2,10 @@ model:
   name: diffusion
   params:
     add_angle_channel: true
-    base: 32
+    base: 64
+    depth: 4                  # 编解码层数
+    emb_dim: 256              # 时间步嵌入维度（128/256/512）
+    dropout: 0.0
 
 data:
   # 先用 Dummy 本地空跑；连服务器后设 false + 填真实路径
@@ -11,13 +14,16 @@ data:
   dummy_length: 16
   dummy_H: 256
   dummy_W: 384
-  batch_size: 2
+
+  batch_size: 4
+  num_workers: 4              # 数据加载线程数，加快 I/O
+  pin_memory: true
 
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
-  ids: [0]
+  ids: [0,01,02]
   step: 1
-  downsample: 1
+  downsample: 2
   truncate_left: 350
   truncate_right: 350
   mask_mode: fixed
@@ -26,7 +32,7 @@ data:
 
 train:
   device: cuda
-  epochs: 10
+  epochs: 150
   lr: 1e-4
   # DDPM 超参
   T: 1000

@@ -18,7 +18,7 @@ data:
   ids: [0]
   step: 1
   downsample: 1
-  
+
   truncate_left: 350
   truncate_right: 350
   mask_mode: fixed
@@ -26,7 +26,7 @@ data:
 
 sample:
   device: cuda
-  ckpt: checkpoints/diffusion/DDPM_epoch10.pth   # 训练好的权重
+  ckpt: checkpoints/diffusion/DDPM_epoch150.pth   # 训练好的权重
   T: 200
   beta_start: 1.0e-4
   beta_end: 2.0e-2

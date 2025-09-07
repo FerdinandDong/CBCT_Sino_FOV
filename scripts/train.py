@@ -2,6 +2,7 @@ import argparse, yaml
 
 # 触发模型注册
 import ctprojfix.models.unet
+import ctprojfix.models.unet_res
 import ctprojfix.models.diffusion.ddpm
 
 from ctprojfix.models.registry import build_model
