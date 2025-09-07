@@ -21,7 +21,7 @@ data:
 
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
-  ids: [0,01,02]
+  ids: [0,5,6]
   step: 1
   downsample: 2
   truncate_left: 350

@@ -5,8 +5,6 @@ import torch.nn.functional as F
 from ..registry import register
 
 
-
-
 def timestep_embedding(t, dim, max_period=10000):
     """
     t: (B,) long
@@ -100,7 +98,7 @@ class Up(nn.Module):
         return self.op(x)
 
 
-# ---------- Diffusion UNet 主体 ----------
+# Diffusion UNet 主体
 
 class TimeCondUNet(nn.Module):
     """
@@ -199,7 +197,7 @@ class TimeCondUNet(nn.Module):
         return x
 
 
-# ---------- 训练不变 ----------
+# 训练不变
 
 @register("diffusion")
 class DDPMProj(nn.Module):

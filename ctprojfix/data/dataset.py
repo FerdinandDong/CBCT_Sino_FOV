@@ -137,16 +137,19 @@ class ProjectionAnglesDataset(Dataset):
         # 简单缓存（整叠），按需取帧
         self.cache_noisy = {}
         self.cache_clean = {}
+        
+        print(f"[DATA] id={id_}: ds={self.downsample} => L_eff={L_eff}, R_eff={R_eff}, W_ds={self.meta[id_]['W']}")
+
 
     def __len__(self):
         return len(self.index)
 
     def _load_frame(self, id_, a, kind="noisy"):
         if kind == "noisy":
-            path = os.path.join(self.root_noisy, f"projectionNoisy{id_}.tif")
+            path = os.path.join(self.root_noisy, f"projectionNoisy{id_:d}.tif")
             cache = self.cache_noisy
         else:
-            path = os.path.join(self.root_clean, f"projection{id_}.tif")
+            path = os.path.join(self.root_clean, f"projection{id_:d}.tif")
             cache = self.cache_clean
 
         if id_ not in cache:
@@ -167,6 +170,11 @@ class ProjectionAnglesDataset(Dataset):
         clean = self._load_frame(id_, a, kind="clean")  # (H,W)
         H, W = noisy.shape
 
+        ds = max(1, self.downsample)
+        # 缩放后的截断宽度
+        L_eff = int(round(self.truncate_left / ds))
+        R_eff = int(round(self.truncate_right / ds))
+
         # 归一化
         if self.normalize == "percentile":
             noisy_n = _percentile_norm(noisy)
@@ -175,15 +183,16 @@ class ProjectionAnglesDataset(Dataset):
             noisy_n = noisy.astype(np.float32, copy=False)
             clean_n = clean.astype(np.float32, copy=False)
 
-        # mask
         if self.mask_mode == "fixed":
-            mask = _make_mask_fixed(H, W, self.truncate_left, self.truncate_right)
+            mask = _make_mask_fixed(H, W, L_eff, R_eff)
         elif self.mask_mode == "auto_nonzero":
             mask = _make_mask_auto_nonzero(noisy)
         else:
             raise ValueError(f"Unknown mask_mode: {self.mask_mode}")
+        ##需要做一次检查 mask是否全0 在sample里做
 
-        # 可选：角度通道
+
+        # 角度通道
         inp_list = [noisy_n[None, ...], mask[None, ...]]  # (2,H,W)
         if self.add_angle_channel:
             angle_norm = float(a) / max(1, A - 1)

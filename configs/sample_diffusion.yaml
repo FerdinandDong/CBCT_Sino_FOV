@@ -2,7 +2,10 @@ model:
   name: diffusion
   params:
     add_angle_channel: true
-    base: 32
+    base: 64
+    depth: 4                  # 编解码层数
+    emb_dim: 256              # 时间步嵌入维度（128/256/512）
+    dropout: 0.0  
 
 data:
   # use_dummy: true          # 本地演示：Dummy 数据集
@@ -17,7 +20,7 @@ data:
   root_clean: /data/shared_folder/projectionsNoisy
   ids: [0]
   step: 1
-  downsample: 1
+  downsample: 2
 
   truncate_left: 350
   truncate_right: 350
@@ -26,7 +29,7 @@ data:
 
 sample:
   device: cuda
-  ckpt: checkpoints/diffusion/DDPM_epoch150.pth   # 训练好的权重
+  ckpt: checkpoints/diffusion/DDPM_epoch101.pth   # 权重
   T: 200
   beta_start: 1.0e-4
   beta_end: 2.0e-2

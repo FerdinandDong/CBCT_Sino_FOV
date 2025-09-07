@@ -15,6 +15,7 @@ ctprojfix/losses/__init__.py
 ctprojfix/models/__init__.py
 ctprojfix/models/registry.py
 ctprojfix/models/unet.py
+ctprojfix/models/unet_res.py
 ctprojfix/models/diffusion/__init__.py
 ctprojfix/models/diffusion/ddpm.py
 ctprojfix/models/diffusion/sampler.py
