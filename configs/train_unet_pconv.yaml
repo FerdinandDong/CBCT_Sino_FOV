@@ -4,7 +4,7 @@ model:
     in_ch_img: 1           # noisy 图像通道数（不含 mask/angle）
     add_angle_channel: true
     base: 64
-    depth: 4
+    depth: 6
     up_mode: nearest       #  bilinear
     out_act: null          # 可选: sigmoid/tanh/null
 
@@ -12,7 +12,7 @@ data:
   use_dummy: false
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
-  ids: [] #  ids: null 全部文件 0, 5, 6
+  ids: [] # null #[] #  ids: null 全部文件 0, 5, 6
   step: 1
   downsample: 1
   truncate_left: 350
@@ -24,9 +24,17 @@ data:
   num_workers: 4
   pin_memory: true
 
+  # —— 新增的可选项 —— 
+  cache_strategy: lru     # none | lru | per_id  （默认 lru）
+  max_cached_ids: 2       # lru 模式最多缓存多少个 id（默认 2）
+
+  # DataLoader 行为（可选）
+  persistent_workers: true
+  prefetch_factor: 2      # 每个 worker 预取多少个 batch 2*4 = 8
+
 train:
   device: cuda
-  epochs: 150
+  epochs: 200
   lr: 3e-4
   ckpt_dir: checkpoints/pconv_unet
   ckpt_prefix: pconv_unet      # 文件名前缀，可选；默认用模型类名
@@ -36,9 +44,12 @@ train:
   resume: "auto"               # "auto"=从目录最新的接着训；可填具体路径；false不续训
   strict_load: true            # 恢复模型 state_dict 的严格模式
 
-  resume_from: checkpoints/pconv_unet/pconv_unet_epoch30.pth
+  resume_from: checkpoints/pconv_unet/pconv_unet_epoch150.pth
   reset_epoch: true
-  reset_optim: true                 # 恢复时是否重置 epoch 和优化器+强指定
+  reset_optim: true            # 恢复时是否重置 epoch 和优化器+强指定
+
+  use_tqdm: true               # 后台模式use_tqdm:false → 关 tqdm，转而用 log_interval 打印
+  log_interval: 100            # 每多少个 batch 打印一次
 
   loss:
     type: combined         # combined / l1 / l2

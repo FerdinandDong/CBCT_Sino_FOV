@@ -12,7 +12,7 @@ class PartialConv2d(nn.Conv2d):
     """
     Partial Convolution (single-channel mask) 版本：
     - mask: (B,1,H,W)，同一张 mask 作用于所有输入通道
-    - 每次前向会同步更新下一层要用的 mask（update_mask）
+    - 每次前向用“当前 batch 的 mask”计算 update_mask/mask_ratio（不跨 batch 复用缓存，避免维度不一致）
     """
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1,
                  padding=1, dilation=1, bias=True, eps=1e-6):
@@ -22,45 +22,34 @@ class PartialConv2d(nn.Conv2d):
         self.slide_win = self.weight_mask.numel()
         self.eps = eps
 
-        self._last_hw = None
-        self._update_mask = None
-        self._mask_ratio = None
-
     def forward(self, x, mask=None):
         B, C, H, W = x.shape
         if mask is None:
             mask = x.new_ones(B, 1, H, W)
 
-        need_recalc = (
-            self._last_hw != (H, W)
-            or self._update_mask is None
-            or self._update_mask.dtype != x.dtype
-            or self._update_mask.device != x.device
-        )
-        if need_recalc:
-            self._last_hw = (H, W)
-            with torch.no_grad():
-                update_mask = F.conv2d(
-                    mask, self.weight_mask.to(x), bias=None,
-                    stride=self.stride, padding=self.padding, dilation=self.dilation, groups=1
-                )
-                mask_ratio = self.slide_win / (update_mask + self.eps)
-                update_mask = torch.clamp(update_mask, 0, 1)
-                mask_ratio = mask_ratio * update_mask
-                self._update_mask = update_mask
-                self._mask_ratio = mask_ratio
+        # —— 关键：始终按“当前 batch 的 mask”现算 —— #
+        with torch.no_grad():
+            update_mask = F.conv2d(
+                mask, self.weight_mask.to(x), bias=None,
+                stride=self.stride, padding=self.padding, dilation=self.dilation, groups=1
+            )                                   # (B,1,H',W')
+            mask_ratio = self.slide_win / (update_mask + self.eps)
+            update_mask = torch.clamp(update_mask, 0, 1)
+            mask_ratio = mask_ratio * update_mask
 
+        # 掩膜输入
         x_masked = x * mask
-        raw = super().forward(x_masked)
+        raw = super().forward(x_masked)         # (B,Cout,H',W')
 
+        # 归一 + 输出区域限制
         if self.bias is not None:
             b = self.bias.view(1, -1, 1, 1)
-            out = (raw - b) * self._mask_ratio + b
+            out = (raw - b) * mask_ratio + b
         else:
-            out = raw * self._mask_ratio
+            out = raw * mask_ratio
 
-        out = out * self._update_mask
-        return out, self._update_mask
+        out = out * update_mask
+        return out, update_mask
 
 
 # ---------------------------
@@ -112,12 +101,12 @@ class UpP(nn.Module):
 
     def forward(self, x, m, skip_x=None, skip_m=None):
         if skip_x is not None:
-            target_hw = skip_x.shape[-2:]                # 直接对齐到 skip 的 H,W
+            target_hw = skip_x.shape[-2:]                # 对齐到 skip 的 (H,W)
             x = self._interp_img(x, target_hw)
             m = F.interpolate(m, size=target_hw, mode="nearest")
             x = torch.cat([x, skip_x], dim=1)
             m = torch.cat([m, skip_m], dim=1)
-            m = m.amax(dim=1, keepdim=True)             # 合并多通道 mask
+            m = m.amax(dim=1, keepdim=True)             # 多通道 mask -> 单通道并集
         else:
             # 最后一层没有 skip，就常规上采样一倍
             if self.mode in ("bilinear", "bicubic"):
@@ -140,7 +129,7 @@ class PConvUNetProj(nn.Module):
     def __init__(self, in_ch_img=1, add_angle_channel=True,
                  base=64, depth=4, up_mode="nearest", out_act=None):
         super().__init__()
-        self.expects_mask = True   # 训练器用到：我吃 (image, mask)
+        self.expects_mask = True   # 供训练器判断：我吃 (image, mask)
         self.use_angle = bool(add_angle_channel)
         img_c = in_ch_img + (1 if self.use_angle else 0)
         self.depth = int(depth)
@@ -151,7 +140,7 @@ class PConvUNetProj(nn.Module):
         enc.append(PConvBNAct(img_c, feat, k=7, s=2, p=3, bn=True, act="leaky"))  # e1: /2
         ch = feat
         for _ in range(1, self.depth):
-            enc.append(DownP(ch, min(ch*2, base*8)))  # 逐层 /2
+            enc.append(DownP(ch, min(ch*2, base*8)))  # e2...e{depth}: 每层 /2
             ch = min(ch*2, base*8)
         self.encoders = nn.ModuleList(enc)
 
@@ -162,7 +151,6 @@ class PConvUNetProj(nn.Module):
         dec = []
         ch_dec = ch
         for i in range(self.depth-1, -1, -1):
-            # i>0 → 有对应 skip；i==0 → 无 skip
             if i > 0:
                 skip_c = (self.encoders[i].pconv.out_channels
                           if isinstance(self.encoders[i], PConvBNAct)
@@ -215,24 +203,23 @@ class PConvUNetProj(nn.Module):
         # Bottleneck
         x, m = self.bott(x, m)
 
-        # Decoder：第 i 次上采样对应 skip 索引 idx = depth-2-i；若 idx<0 则无 skip
+        # Decoder：前 depth-1 次带 skip，最后一次不上 skip
         for i, dec in enumerate(self.decoders):
             if i < self.depth - 1:
-                enc_idx = self.depth - 1 - i   # 3,2,1 对应 e4,e3,e2（以 depth=4 为例）
+                enc_idx = self.depth - 1 - i   # 与 encoder 对齐
                 skip_x = feats[enc_idx]
                 skip_m = masks[enc_idx]
                 x, m = dec(x, m, skip_x, skip_m)
             else:
-                # 最后一层不上 skip
                 x, m = dec(x, m, None, None)
 
-
-        # Decoder 循环结束后，确保回到原尺寸
+        # 最后，确保与输入同尺寸
         if x.shape[-2:] != (H0, W0):
-            if self.decoders[0].mode in ("bilinear", "bicubic"):
-                x = F.interpolate(x, size=(H0, W0), mode=self.decoders[0].mode, align_corners=False)
+            mode = self.decoders[0].mode
+            if mode in ("bilinear", "bicubic"):
+                x = F.interpolate(x, size=(H0, W0), mode=mode, align_corners=False)
             else:
-                x = F.interpolate(x, size=(H0, W0), mode=self.decoders[0].mode)
+                x = F.interpolate(x, size=(H0, W0), mode=mode)
             m = F.interpolate(m, size=(H0, W0), mode="nearest")
 
         out = self.head(x)

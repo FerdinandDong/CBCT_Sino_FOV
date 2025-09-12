@@ -4,7 +4,7 @@ model:
     in_ch_img: 1            # noisy 图像的通道数（不含 mask/angle）
     add_angle_channel: true # 数据里若提供 angle 则拼到输入
     base: 64
-    depth: 4
+    depth: 6
     up_mode: nearest       # nearest/bilinear/bicubic
     out_act: null           # null/sigmoid/tanh（通常 null，评估前已归一化）
 
@@ -14,25 +14,25 @@ data:
   dummy_length: 8
   dummy_H: 256
   dummy_W: 384
-  batch_size: 2
+  batch_size: 8
   add_angle_channel: true
 
   # 真实数据
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
   ids: [0]                 # [0, 10, 11]
-  step: 30
+  step: 10
   downsample: 1
   truncate_left: 350
   truncate_right: 350
   mask_mode: fixed         # fixed / auto_nonzero
   normalize: percentile    # percentile / none
-  batch_size: 2
-  num_workers: 4
+  batch_size: 8
+  num_workers: 8
   pin_memory: true
 
 eval:
   device: cuda
-  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_epoch150.pth  # 权重
+  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_epoch5.pth  # 权重
   out_dir: outputs/eval_pconv
   show_idx: mid        # "mid"=中间 slice；或具体数字 idx

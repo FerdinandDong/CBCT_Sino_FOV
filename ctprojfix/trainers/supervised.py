@@ -1,5 +1,5 @@
 # ctprojfix/trainers/supervised.py
-import os, re, glob
+import os, re, glob, sys
 import torch
 import torch.nn.functional as F
 from torch.optim import Adam
@@ -30,9 +30,9 @@ def _rotate_ckpts(ckpt_dir: str, prefix: str | None, max_keep: int | None):
         old = files.pop(0)
         try:
             os.remove(old)
-            print(f"[CKPT] removed old -> {old}")
+            print(f"[CKPT] removed old -> {old}", flush=True)
         except Exception as e:
-            print(f"[CKPT] remove failed {old}: {e}")
+            print(f"[CKPT] remove failed {old}: {e}", flush=True)
 
 
 class SupervisedTrainer:
@@ -42,17 +42,20 @@ class SupervisedTrainer:
         lr=3e-4,
         epochs=2,
         ckpt_dir="checkpoints",
-        ckpt_prefix=None,      # 文件名前缀
-        save_every=1,          # 每几轮保存
-        max_keep=5,            # 最多保留几个
-        # —— 续训选项 —— 
-        resume_from=None,      # 明确指定 ckpt 路径；None 表示看 resume="auto"/False
-        resume="auto",         # "auto" | False
-        reset_epoch=False,     # True: 从 1 开始计数
-        reset_optim=False,     # True: 不加载优化器状态
-        strict_load=True,      # 严格加载 state_dict
-        # —— 损失配置 —— 
+        ckpt_prefix=None,
+        save_every=1,
+        max_keep=5,
+        # —— 续训选项 ——
+        resume_from=None,
+        resume="auto",
+        reset_epoch=False,
+        reset_optim=False,
+        strict_load=True,
+        # —— 损失配置 ——
         loss_cfg=None,
+        # —— 日志相关 ——
+        use_tqdm=True,
+        log_interval=None,
     ):
         # 设备 & 超参
         self.device = torch.device(device if torch.cuda.is_available() else "cpu") \
@@ -76,7 +79,15 @@ class SupervisedTrainer:
 
         # 损失
         self.criterion = build_criterion_from_cfg(self.device, loss_cfg or {"type": "l2"})
-        print(f"[LOSS] using criterion: {type(self.criterion).__name__}")
+        print(f"[LOSS] using criterion: {type(self.criterion).__name__}", flush=True)
+
+        # GPU 信息
+        self.device_current_id = torch.cuda.current_device() if self.device.type == "cuda" else None
+
+        # 日志相关
+        self.use_tqdm = bool(use_tqdm)
+        self.log_interval = None if log_interval is None else int(log_interval)
+        self._tqdm_disable = (not sys.stderr.isatty()) or (not self.use_tqdm)
 
     # ---------- ckpt 命名/保存/加载 ----------
     def _ckpt_name(self, model, epoch: int):
@@ -86,17 +97,16 @@ class SupervisedTrainer:
     def _try_resume(self, model, opt):
         """返回起始 epoch（续训时为 last_epoch+1）"""
         ckpt_path = None
-
-        if self.resume_from:             # 明确指定
+        if self.resume_from:
             ckpt_path = self.resume_from
-        elif self.resume == "auto":      # 自动找最新
+        elif self.resume == "auto":
             ckpt_path = _latest_ckpt(self.ckpt_dir, self.ckpt_prefix)
 
         if not ckpt_path or not os.path.isfile(ckpt_path):
-            print("[RESUME] no checkpoint found; start from scratch.")
+            print("[RESUME] no checkpoint found; start from scratch.", flush=True)
             return 1
 
-        print(f"[RESUME] loading: {ckpt_path}")
+        print(f"[RESUME] loading: {ckpt_path}", flush=True)
         ckpt = torch.load(ckpt_path, map_location=self.device)
         state = ckpt.get("state_dict", ckpt)
         model.load_state_dict(state, strict=self.strict_load)
@@ -105,11 +115,11 @@ class SupervisedTrainer:
             try:
                 opt.load_state_dict(ckpt["optimizer"])
             except Exception as e:
-                print(f"[RESUME] optimizer state load failed: {e}")
+                print(f"[RESUME] optimizer state load failed: {e}", flush=True)
 
         last_epoch = int(ckpt.get("epoch", 0))
         start_epoch = 1 if self.reset_epoch else (last_epoch + 1 if last_epoch > 0 else 1)
-        print(f"[RESUME] resumed at epoch {last_epoch} -> start from {start_epoch}")
+        print(f"[RESUME] resumed at epoch {last_epoch} -> start from {start_epoch}", flush=True)
         return start_epoch
 
     def _save_ckpt(self, model, opt, epoch: int):
@@ -120,7 +130,7 @@ class SupervisedTrainer:
             "optimizer": opt.state_dict(),
         }
         torch.save(payload, path)
-        print(f"[CKPT] saved -> {path}")
+        print(f"[CKPT] saved -> {path}", flush=True)
         _rotate_ckpts(self.ckpt_dir, self.ckpt_prefix, self.max_keep)
 
     # ---------- 训练主循环 ----------
@@ -128,41 +138,47 @@ class SupervisedTrainer:
         model = model.to(self.device)
         opt = Adam(model.parameters(), lr=self.lr)
 
-        # 续训（如配置）
+        # 续训
         start_epoch = self._try_resume(model, opt)
+
+        print("device:", self.device, "current_id:", self.device_current_id, flush=True)
 
         for epoch in range(start_epoch, self.epochs + 1):
             model.train()
             losses = []
-            pbar = tqdm(loader, desc=f"Epoch {epoch}")
 
-            for batch in pbar:
-                x = batch["inp"].to(self.device)  # (B,C,H,W)，约定 x[:,0]=noisy, x[:,1]=mask, x[:,2]=angle(可选)
-                y = batch["gt"].to(self.device)   # (B,1,H,W)
+            data_iter = tqdm(loader, desc=f"Epoch {epoch}", disable=self._tqdm_disable) \
+                        if not self._tqdm_disable else loader
 
-                # 前向（PConv 模型会在内部拆 noisy/mask）
+            for step, batch in enumerate(data_iter, 1):
+                x = batch["inp"].to(self.device, non_blocking=True)
+                y = batch["gt"].to(self.device, non_blocking=True)
+
                 pred = model(x)
 
-                # 统一构造 M（中心有效=1），给 CombinedLoss；若 criterion 只接收 2 个参数，则降级
                 if getattr(model, "expects_mask", False):
-                    M = x[:, 1:2]  # PConv 模型输入包含 mask
+                    M = x[:, 1:2]
                 else:
                     M = torch.ones_like(y)
 
                 try:
-                    loss = self.criterion(pred, y, M)   # CombinedLoss 等 3参
+                    loss = self.criterion(pred, y, M)
                 except TypeError:
-                    loss = self.criterion(pred, y)      # L1/L2 等 2参
+                    loss = self.criterion(pred, y)
 
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 opt.step()
 
-                losses.append(loss.item())
-                pbar.set_postfix(loss=f"{loss.item():.4f}")
+                losses.append(float(loss.detach().cpu()))
+
+                if not self._tqdm_disable:
+                    data_iter.set_postfix(loss=f"{loss.item():.4f}")
+                elif self.log_interval and (step % self.log_interval == 0):
+                    print(f"[Epoch {epoch} | Step {step}/{len(loader)}] loss={loss.item():.4f}", flush=True)
 
             mean_loss = sum(losses) / max(1, len(losses))
-            print(f"Epoch {epoch} mean loss: {mean_loss:.4f}")
+            print(f"Epoch {epoch} mean loss: {mean_loss:.4f}", flush=True)
 
             if (epoch % self.save_every) == 0:
                 self._save_ckpt(model, opt, epoch)
