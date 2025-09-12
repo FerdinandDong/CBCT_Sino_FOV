@@ -12,7 +12,7 @@ data:
   use_dummy: false
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
-  ids: [0, 5, 6]
+  ids: [] #  ids: null 全部文件 0, 5, 6
   step: 1
   downsample: 1
   truncate_left: 350
@@ -20,7 +20,7 @@ data:
   mask_mode: fixed
   normalize: percentile
   add_angle_channel: true
-  batch_size: 4
+  batch_size: 8
   num_workers: 4
   pin_memory: true
 

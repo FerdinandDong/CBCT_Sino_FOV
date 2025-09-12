@@ -33,6 +33,6 @@ data:
 
 eval:
   device: cuda
-  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_epoch30.pth  # 权重
+  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_epoch150.pth  # 权重
   out_dir: outputs/eval_pconv
   show_idx: mid        # "mid"=中间 slice；或具体数字 idx
