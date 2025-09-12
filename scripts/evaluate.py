@@ -3,11 +3,15 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import matplotlib
-matplotlib.use("Agg")  # 服务器无显示环境时避免卡住
+matplotlib.use("Agg")  # 无显示环境时避免卡住
 import matplotlib.pyplot as plt
 
-# 触发模型注册
+# 触发模型注册：把可能用到的模型都 import 一次
 import ctprojfix.models.unet
+import ctprojfix.models.unet_res
+import ctprojfix.models.pconv_unet
+import ctprojfix.models.diffusion.ddpm
+
 from ctprojfix.models.registry import build_model
 from ctprojfix.data.dataset import make_dataloader, DummyDataset
 from ctprojfix.evals.metrics import psnr, ssim
@@ -29,12 +33,47 @@ def load_checkpoint(model, ckpt_path, device):
     return model
 
 
+def _to_py(obj):
+    """把可能是 tensor/ndarray 的标量或 1D 元素，转成 python 标量或可打印字符串"""
+    if isinstance(obj, torch.Tensor):
+        if obj.numel() == 1:
+            return obj.item()
+        return obj.detach().cpu().tolist()
+    if isinstance(obj, np.ndarray):
+        if obj.size == 1:
+            return float(obj.reshape(-1)[0])
+        return obj.tolist()
+    return obj
+
+
+def _get_item_from_batch(batch, key, i, default=None):
+    """从 batch[key] 中取第 i 个样本的值（支持标量/1D tensor/ndarray/list）"""
+    if key not in batch:
+        return default
+    v = batch[key]
+    if isinstance(v, torch.Tensor):
+        if v.ndim == 0:
+            return v.item()
+        return v[i].item() if v.ndim >= 1 else default
+    if isinstance(v, (list, tuple)):
+        try:
+            return v[i]
+        except Exception:
+            return v if len(v) == 1 else default
+    if isinstance(v, np.ndarray):
+        if v.ndim == 0:
+            return float(v)
+        return v[i] if v.ndim >= 1 else default
+    # 标量
+    return v
+
+
 def save_triptych(noisy, pred, gt, out_path, title=None):
     """保存三联图 + 误差图"""
     fig, axes = plt.subplots(1, 4, figsize=(14, 4))
-    axes[0].imshow(noisy, cmap="gray"); axes[0].set_title("Noisy"); axes[0].axis("off")
-    axes[1].imshow(pred,  cmap="gray"); axes[1].set_title("Pred");  axes[1].axis("off")
-    axes[2].imshow(gt,    cmap="gray"); axes[2].set_title("GT");    axes[2].axis("off")
+    axes[0].imshow(noisy, cmap="gray", vmin=0, vmax=1); axes[0].set_title("Noisy"); axes[0].axis("off")
+    axes[1].imshow(pred,  cmap="gray", vmin=0, vmax=1); axes[1].set_title("Pred");  axes[1].axis("off")
+    axes[2].imshow(gt,    cmap="gray", vmin=0, vmax=1); axes[2].set_title("GT");    axes[2].axis("off")
     err = np.abs(pred - gt)
     im = axes[3].imshow(err, cmap="magma"); axes[3].set_title("|Pred-GT|"); axes[3].axis("off")
     fig.colorbar(im, ax=axes[3], fraction=0.046, pad=0.04)
@@ -68,12 +107,13 @@ def main():
             W=cfg["data"].get("dummy_W", 384),
             truncate_left=cfg["data"].get("truncate_left", 64),
             truncate_right=cfg["data"].get("truncate_right", 64),
+            add_angle_channel=cfg["data"].get("add_angle_channel", False),
         )
         from torch.utils.data import DataLoader
         loader = DataLoader(dummy, batch_size=cfg["data"].get("batch_size", 1), shuffle=False, num_workers=0)
 
     # 输出
-    save_dir = cfg["eval"].get("out_dir", "outputs/unet")
+    save_dir = cfg["eval"].get("out_dir", "outputs/eval")
     os.makedirs(save_dir, exist_ok=True)
     trip_dir = os.path.join(save_dir, "figs")
     os.makedirs(trip_dir, exist_ok=True)
@@ -91,27 +131,27 @@ def main():
     psnrs, ssims = [], []
     img_count = 0
 
-    # 写 CSV 头
+    # 写 CSV
     with open(csv_path, "w", newline="") as fcsv:
         writer = csv.writer(fcsv)
         writer.writerow(["idx", "id", "angle", "PSNR", "SSIM"])
 
         with torch.no_grad():
             for batch in tqdm(loader, desc="Eval"):
-                x = batch["inp"].to(device)  # (B,2,H,W) -> noisy=x[:,0], mask=x[:,1]
+                x = batch["inp"].to(device)  # 约定：x[:,0]=noisy, x[:,1]=mask, x[:,2]=angle(可选)
                 y = batch["gt"].to(device)   # (B,1,H,W)
                 pred = model(x)
 
-                pred_np = pred.detach().cpu().numpy()
-                gt_np   = y.detach().cpu().numpy()
-                noisy_np= x[:,0:1].detach().cpu().numpy()  # (B,1,H,W)
+                pred_np  = pred.detach().cpu().numpy()
+                gt_np    = y.detach().cpu().numpy()
+                noisy_np = x[:, 0:1].detach().cpu().numpy()  # (B,1,H,W)
 
                 for i in range(pred_np.shape[0]):
                     p = np.squeeze(pred_np[i], 0)   # (H,W)
                     g = np.squeeze(gt_np[i], 0)
                     n = np.squeeze(noisy_np[i], 0)
 
-                    # clip 到 [0,1] 以确保指标一致
+                    # 指标范围对齐
                     p = np.clip(p, 0.0, 1.0)
                     g = np.clip(g, 0.0, 1.0)
                     n = np.clip(n, 0.0, 1.0)
@@ -120,20 +160,20 @@ def main():
                     cur_ssim = ssim(p, g, data_range=1.0)
                     psnrs.append(cur_psnr); ssims.append(cur_ssim)
 
-                    # 记录 csv
-                    id_str = str(batch.get("id", ["?"])[0]) if isinstance(batch.get("id"), list) else str(batch.get("id", "?"))
-                    angle  = int(batch.get("angle", torch.tensor(-1))[i].item()) if "angle" in batch else -1
-                    writer.writerow([img_count, id_str, angle, f"{cur_psnr:.4f}", f"{cur_ssim:.4f}"])
+                    id_val = _get_item_from_batch(batch, "id", i, default="?")
+                    angle  = _get_item_from_batch(batch, "angle", i, default=-1)
+                    writer.writerow([img_count, str(id_val), int(angle), f"{cur_psnr:.4f}", f"{cur_ssim:.4f}"])
 
-                    # 保存单张图（可选）
-                    plt.imsave(os.path.join(save_dir, f"pred_{img_count:05d}.png"), p, cmap="gray")
-                    plt.imsave(os.path.join(save_dir, f"gt_{img_count:05d}.png"),   g, cmap="gray")
-                    plt.imsave(os.path.join(save_dir, f"noisy_{img_count:05d}.png"),n, cmap="gray")
+                    # 保存单张
+                    plt.imsave(os.path.join(save_dir, f"pred_{img_count:05d}.png"), p, cmap="gray", vmin=0, vmax=1)
+                    plt.imsave(os.path.join(save_dir, f"gt_{img_count:05d}.png"),   g, cmap="gray", vmin=0, vmax=1)
+                    plt.imsave(os.path.join(save_dir, f"noisy_{img_count:05d}.png"),n, cmap="gray", vmin=0, vmax=1)
 
                     # 保存一张三联+误差
                     if img_count == show_idx:
-                        save_triptych(n, p, g, os.path.join(trip_dir, f"triptych_{img_count:05d}.png"),
-                                      title=f"id={id_str}, angle={angle}, idx={img_count}")
+                        save_triptych(n, p, g,
+                                      os.path.join(trip_dir, f"triptych_{img_count:05d}.png"),
+                                      title=f"id={id_val}, angle={angle}, idx={img_count}")
 
                     img_count += 1
 

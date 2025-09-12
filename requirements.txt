@@ -26,3 +26,7 @@ torch==2.1.0
 tqdm==4.67.1
 typing_extensions
 zipp==3.23.0
+
+torchvision
+pytorch-msssim
+lpips

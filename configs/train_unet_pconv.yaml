@@ -1,0 +1,59 @@
+model:
+  name: pconv_unet
+  params:
+    in_ch_img: 1           # noisy 图像通道数（不含 mask/angle）
+    add_angle_channel: true
+    base: 64
+    depth: 4
+    up_mode: nearest       #  bilinear
+    out_act: null          # 可选: sigmoid/tanh/null
+
+data:
+  use_dummy: false
+  root_noisy: /data/shared_folder/projectionsNoisy
+  root_clean: /data/shared_folder/projectionsNoisy
+  ids: [0, 5, 6]
+  step: 1
+  downsample: 1
+  truncate_left: 350
+  truncate_right: 350
+  mask_mode: fixed
+  normalize: percentile
+  add_angle_channel: true
+  batch_size: 4
+  num_workers: 4
+  pin_memory: true
+
+train:
+  device: cuda
+  epochs: 150
+  lr: 3e-4
+  ckpt_dir: checkpoints/pconv_unet
+  ckpt_prefix: pconv_unet      # 文件名前缀，可选；默认用模型类名
+  save_every: 1                # 每多少 epoch 存一次
+  max_keep: 5                  # 最多保留 N 个，超出会删最旧的
+
+  resume: "auto"               # "auto"=从目录最新的接着训；可填具体路径；false不续训
+  strict_load: true            # 恢复模型 state_dict 的严格模式
+
+  resume_from: checkpoints/pconv_unet/pconv_unet_epoch30.pth
+  reset_epoch: true
+  reset_optim: true                 # 恢复时是否重置 epoch 和优化器+强指定
+
+  loss:
+    type: combined         # combined / l1 / l2
+    opts:
+      use_perceptual: true  # 下载权重时
+      use_style: true
+      use_ssim: true
+      use_edge: true
+      use_lpips: true
+      w_perc: 20.0
+      w_style: 200.0
+      w_ssim: 0.001
+      w_edge: 0.4
+      w_lpips: 0.8
+      w_l1_hole: 0.1
+      w_l1_valid: 0.01
+      use_l2: true
+      w_l2: 1.0

@@ -67,7 +67,9 @@ class DiffusionTrainer:
             model.train()
             epoch_losses = []
 
-            pbar = tqdm(loader, desc=f"DDPM Epoch {epoch}")
+            pbar = tqdm(loader, desc=f"DDPM Epoch {epoch}",  disable=True)  #只打印epoch级别 防止log过大
+            # pbar = tqdm(loader, desc=f"DDPM Epoch {epoch}") # 进度条显示
+
             for batch in pbar:
                 noisy = batch["inp"][:,0:1].to(self.device)   # (B,1,H,W)
                 mask  = batch["inp"][:,1:2].to(self.device)   # (B,1,H,W)

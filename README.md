@@ -1,3 +1,49 @@
+## 当前代码结构（2025-09-12）
+
+```
+CBCT_Sino_FOV/
+├─ checkpoints/                  # 权重保存
+│  ├─ diffusion/
+│  └─ pconv_unet/               # PConv-UNet 权重
+├─ configs/                      # 训练 / 采样 / 评估配置
+│  ├─ train_unet.yaml
+│  ├─ train_unet_pconv.yaml     # PConv-UNet 训练配置（含组合损失与续训）
+│  ├─ train_diffusion.yaml
+│  └─ eval.yaml                  # 统一评估配置（PSNR/SSIM、保存三联图）
+├─ ctprojfix/                    # 核心库
+│  ├─ data/                      # 数据集定义（Dummy / ProjectionAnglesDataset）
+│  │  └─ dataset.py
+│  ├─ evals/                     # 指标 (PSNR / SSIM)
+│  │  └─ metrics.py
+│  ├─ losses/                    # 损失 (L1/L2/SSIM/感知/风格/LPIPS/区域L1)
+│  │  └─ criterion.py
+│  ├─ models/
+│  │  ├─ registry.py             # 模型注册器（build_model / @register）
+│  │  ├─ unet.py                 # UNet baseline
+│  │  ├─ unet_res.py             # ResNet-UNet 扩展
+│  │  ├─ pconv_unet.py           # 新增：PConv-UNet（带单通道 mask 的 PartialConv）
+│  │  └─ diffusion/              # 扩散模型 (DDPM, Sampler)
+│  ├─ recon/                     # 预留：FBP/FDK
+│  ├─ trainers/
+│  │  ├─ supervised.py           # 新增：支持续训/轮转删除/组合损失的监督训练器
+│  │  └─ diffusion.py
+│  └─ utils/
+├─ outputs/
+│  └─ sample/
+├─ scripts/
+│  ├─ train.py                   # 统一训练入口（根据 model.name 选择 trainer）
+│  ├─ evaluate.py                # 新增：统一评估（保存三联图与 metrics.csv）
+│  └─ sample_diffusion.py
+├─ tests/                        # 预留
+├─ requirements.txt
+├─ setup.py
+├─ pyproject.toml
+└─ README.md
+
+```
+
+
+
 ## 当前代码结构（2025-09-07）
 
 ```
@@ -87,34 +133,6 @@ flowchart LR
 
 ---
 
-### 2025-09-07
-- **加入扩散模型 (Diffusion/DDPM)**：
-  - 新增目录 `ctprojfix/models/diffusion/`，实现 `ddpm.py` 与 `sampler.py`
-  - 新增 `ctprojfix/trainers/diffusion.py`，实现 **DiffusionTrainer**
-  - 支持条件输入 `[noisy, mask, (angle)]`，可扩展 angle channel
-- **训练**：
-  - `configs/train_diffusion.yaml` 配置，支持 T/beta_start/beta_end 等超参
-  - 服务器上实际数据集可跑通（逐角度帧，batch 维度稳定）
-  - 实现 checkpoint 循环保存（max_keep 保留最近若干）
-- **采样**：
-  - 新增 `scripts/sample_diffusion.py`：
-    - 实现 DDPM 逆扩散流程
-    - 集成 **数据一致性 (DC)** 硬/软模式
-    - 输出 `pred/noisy/mask/(gt)` PNG
-    - 加入安全检查：
-      - `assert mask.sum() > 0`（防止全零）
-      - `assert mask.shape == x_t.shape`（防止尺寸错位）
-  - 解决了 **downsample ≠ 1 时 mask 与中心模糊** 的 bug（mask L/R 按 downsample 缩放）
-- **评估与可视化**：
-  - UNet/Diffusion 均支持 `evaluate.py` 或 `sample_diffusion.py` 跑通
-  - 输出样例图片，支持 Dummy 流程验证
-- **训练/采样一致性**：
-  - 注意 `downsample` 必须与训练配置一致，否则中心区域会被 DC 覆盖模糊
-  - 已在代码中补丁，保证 mask 缩放匹配
----
-
-
-
 
 ## 当前代码结构（2025‑08‑28）
 
@@ -173,6 +191,60 @@ python scripts/evaluate.py --cfg configs/eval.yaml
 ---
 
 ## Changelog
+
+### 2025-09-12
+- **模型**
+  - 新增 ctprojfix/models/pconv_unet.py：基于 Partial Convolution 的 U-Net 变体
+    * 单通道 mask (B,1,H,W)，每层自动更新有效域；支持 add_angle_channel
+    * 尺寸对齐策略：解码阶段先对齐到对应 skip 的空间尺寸再拼接，避免奇偶数/上取整导致的 1px 不匹配
+
+- **损失**
+  - 新增 ctprojfix/losses/criterion.py：可配置“组合损失”
+    * 组件可选：L2/L1、SSIM、Perceptual(VGG16)、Style(Gram on VGG)、LPIPS、Edge(Sobel)、L1(hole/valid)
+    * 依赖缺失自动降级，保证在无外网环境也能跑（仅 L2 等）
+
+- **训练器**
+  - 强化 ctprojfix/trainers/supervised.py：
+    * resume_from / resume="auto" 自动续训
+    * reset_epoch / reset_optim 控制是否重置计数与优化器
+    * ckpt_prefix、save_every、max_keep 轮转删除旧权重
+    * 对 PConv 自动取 x[:,1:2] 作为 mask 传入组合损失
+
+- **数据**
+  - ProjectionAnglesDataset：支持 mask_mode=fixed/auto_nonzero、downsample/step/truncate_left/right、角度通道
+
+- **评估**
+  - 新增 scripts/evaluate.py + configs/eval.yaml：
+    * 批量计算 PSNR/SSIM
+    * 保存 Noisy/Pred/GT/误差 四联图与 metrics.csv
+
+
+---
+### 2025-09-07
+- **加入扩散模型 (Diffusion/DDPM)**：
+  - 新增目录 `ctprojfix/models/diffusion/`，实现 `ddpm.py` 与 `sampler.py`
+  - 新增 `ctprojfix/trainers/diffusion.py`，实现 **DiffusionTrainer**
+  - 支持条件输入 `[noisy, mask, (angle)]`，可扩展 angle channel
+- **训练**：
+  - `configs/train_diffusion.yaml` 配置，支持 T/beta_start/beta_end 等超参
+  - 服务器上实际数据集可跑通（逐角度帧，batch 维度稳定）
+  - 实现 checkpoint 循环保存（max_keep 保留最近若干）
+- **采样**：
+  - 新增 `scripts/sample_diffusion.py`：
+    - 实现 DDPM 逆扩散流程
+    - 集成 **数据一致性 (DC)** 硬/软模式
+    - 输出 `pred/noisy/mask/(gt)` PNG
+    - 加入安全检查：
+      - `assert mask.sum() > 0`（防止全零）
+      - `assert mask.shape == x_t.shape`（防止尺寸错位）
+  - 解决了 **downsample ≠ 1 时 mask 与中心模糊** 的 bug（mask L/R 按 downsample 缩放）
+- **评估与可视化**：
+  - UNet/Diffusion 均支持 `evaluate.py` 或 `sample_diffusion.py` 跑通
+  - 输出样例图片，支持 Dummy 流程验证
+- **训练/采样一致性**：
+  - 注意 `downsample` 必须与训练配置一致，否则中心区域会被 DC 覆盖模糊
+  - 已在代码中补丁，保证 mask 缩放匹配
+---
 
 ### 2025‑08‑28
 - 初始化仓库 & 目录骨架（configs/scripts/ctprojfix/...）

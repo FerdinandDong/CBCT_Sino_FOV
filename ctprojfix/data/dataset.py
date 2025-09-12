@@ -192,6 +192,11 @@ class ProjectionAnglesDataset(Dataset):
         ##需要做一次检查 mask是否全0 在sample里做
 
 
+        if mask.sum() <= 0:
+            raise RuntimeError(f"[DATA] mask is all zeros for id={id_}, angle={a}; "
+                            f"check truncate_left/right vs downsample.")
+
+
         # 角度通道
         inp_list = [noisy_n[None, ...], mask[None, ...]]  # (2,H,W)
         if self.add_angle_channel:

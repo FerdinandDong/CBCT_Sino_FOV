@@ -1,26 +1,38 @@
 model:
-  name: unet
+  name: pconv_unet
   params:
-    in_ch: 2          # [noisy, mask]
-    out_ch: 1
-    base: 32
+    in_ch_img: 1            # noisy 图像的通道数（不含 mask/angle）
+    add_angle_channel: true # 数据里若提供 angle 则拼到输入
+    base: 64
+    depth: 4
+    up_mode: nearest       # nearest/bilinear/bicubic
+    out_act: null           # null/sigmoid/tanh（通常 null，评估前已归一化）
 
 data:
   use_dummy: false
-  batch_size: 1
-  # 真实数据路径
+  # Dummy 回退参数（仅当本地无数据时）
+  dummy_length: 8
+  dummy_H: 256
+  dummy_W: 384
+  batch_size: 2
+  add_angle_channel: true
+
+  # 真实数据
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
-  ids: [0]           # 可加多个 ID
-  step: 4            # 抽帧加速
-  downsample: 2      # 降采样加速
+  ids: [0]                 # [0, 10, 11]
+  step: 30
+  downsample: 1
   truncate_left: 350
   truncate_right: 350
-  mask_mode: fixed
-  normalize: percentile
+  mask_mode: fixed         # fixed / auto_nonzero
+  normalize: percentile    # percentile / none
+  batch_size: 2
+  num_workers: 4
+  pin_memory: true
 
 eval:
   device: cuda
-  ckpt: "checkpoints/UNetProj_epoch10.pth"   # 确认存在
-  out_dir: outputs/unet
-  show_idx: mid    # 或具体数字 180
+  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_epoch30.pth  # 权重
+  out_dir: outputs/eval_pconv
+  show_idx: mid        # "mid"=中间 slice；或具体数字 idx

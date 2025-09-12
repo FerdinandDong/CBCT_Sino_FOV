@@ -29,7 +29,7 @@ data:
 
 sample:
   device: cuda
-  ckpt: checkpoints/diffusion/DDPM_epoch101.pth   # 权重
+  ckpt: checkpoints/diffusion/DDPM_epoch150.pth   # 权重
   T: 200
   beta_start: 1.0e-4
   beta_end: 2.0e-2
