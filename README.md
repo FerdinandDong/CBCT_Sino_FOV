@@ -23,7 +23,7 @@ CBCT_Sino_FOV/
 │  │  ├─ unet_res.py             # ResNet-UNet 扩展
 │  │  ├─ pconv_unet.py           # 新增：PConv-UNet（带单通道 mask 的 PartialConv）
 │  │  └─ diffusion/              # 扩散模型 (DDPM, Sampler)
-│  ├─ recon/                     # 预留：FBP/FDK
+│  ├─ recon/                     # 
 │  ├─ trainers/
 │  │  ├─ supervised.py           # 新增：支持续训/轮转删除/组合损失的监督训练器
 │  │  └─ diffusion.py
