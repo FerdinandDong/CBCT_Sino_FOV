@@ -12,7 +12,7 @@ data:
   use_dummy: false
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
-  ids: [] # null #[] #  ids: null 全部文件 0, 5, 6
+  ids: [] # null #[] #  ids: null 全部文件 
   step: 1
   downsample: 1
   truncate_left: 350
