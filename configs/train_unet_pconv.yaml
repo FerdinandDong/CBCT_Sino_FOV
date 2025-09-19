@@ -24,11 +24,11 @@ data:
   num_workers: 4
   pin_memory: true
 
-  # —— 新增的可选项 —— 
+  # 可选项  
   cache_strategy: lru     # none | lru | per_id  （默认 lru）
   max_cached_ids: 2       # lru 模式最多缓存多少个 id（默认 2）
 
-  # DataLoader 行为（可选）
+  # DataLoader 行为
   persistent_workers: true
   prefetch_factor: 2      # 每个 worker 预取多少个 batch 2*4 = 8
 

@@ -1,16 +1,16 @@
 model:
   name: pconv_unet
   params:
-    in_ch_img: 1            # noisy 图像的通道数（不含 mask/angle）
-    add_angle_channel: true # 数据里若提供 angle 则拼到输入
+    in_ch_img: 1
+    add_angle_channel: true
     base: 64
     depth: 6
-    up_mode: nearest       # nearest/bilinear/bicubic
-    out_act: null           # null/sigmoid/tanh（通常 null，评估前已归一化）
+    up_mode: nearest
+    out_act: null
 
 data:
   use_dummy: false
-  # Dummy 回退参数（仅当本地无数据时）
+  # Dummy 仅兜底，不用可不管
   dummy_length: 8
   dummy_H: 256
   dummy_W: 384
@@ -20,19 +20,72 @@ data:
   # 真实数据
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
-  ids: [0]                 # [0, 10, 11]
-  step: 10
+  ids: [0]
+  step: 1
   downsample: 1
   truncate_left: 350
   truncate_right: 350
-  mask_mode: fixed         # fixed / auto_nonzero
-  normalize: percentile    # percentile / none
+  mask_mode: fixed          # fixed / auto_nonzero
+  normalize: percentile     # percentile / none
   batch_size: 8
   num_workers: 8
   pin_memory: true
 
+  # 仅评估时打开：为每帧返回 lo/hi，便于在 outputs 导出 RAW *.npy
+  return_norm_stats: true
+
 eval:
   device: cuda
-  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_epoch5.pth  # 权重
+  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_epoch162.pth
   out_dir: outputs/eval_pconv
-  show_idx: mid        # "mid"=中间 slice；或具体数字 idx
+  show_idx: mid
+  
+  save_volume: true      # 是否导出整卷预测
+  save_format: both      # npy tiff both
+  save_gt_noisy: true    # 是否同时导出 GT / Noisy 整卷
+recon3d:
+  # 从 evaluate.py 的输出目录读取
+  from_dir: outputs/eval_pconv
+  save_dir: outputs/eval_pconv/recon3d
+  metrics_csv: metrics.csv
+
+  # 若 CSV 里没有 A 列，用这个默认总帧数（否则忽略）
+  A_default: 360 # 360
+
+  # 读取优先级：先 RAW NPY，缺了就回退 PNG（0~1）
+  pattern_noisy_raw: "noisy_raw_*.npy"
+  pattern_pred_raw:  "pred_raw_*.npy"
+  pattern_gt_raw:    "gt_raw_*.npy"
+  pattern_noisy_png: "noisy_*.png"
+  pattern_pred_png:  "pred_*.png"
+  pattern_gt_png:    "gt_*.png"
+
+  # 几何参数单位一致
+
+  #源到探测器 (SDD)：矩阵第一行 / 第二行的平移项是 ~372000、288000；结合比例因子，
+  #$大约对应 SDD  1200 mm 左右（因为 ODD = SDD - SOD  300 m
+
+  du: 1.0              # detector 像素尺寸 U 方向
+  dv: 1.0              # detector 像素尺寸 V 方向
+  SOD: 600.0          # source-to-object distance
+  ODD: 300.0          # object-to-detector distance
+  vol_shape: [512, 512, 512]  # [Z,Y,X]
+  filter: "ram-lak"    # ram-lak | shepp-logan | cosine | hamming | hann
+  gpu: 0
+
+
+  angle_direction: -1       # 先1 条纹呈扇形反向扩散，试 -1
+  angle_offset_deg: 90   # 先 0；180（等价 rot180）， 90/-90
+  split_half: false    # 半圈开关
+
+
+  # 排错开关（顺序：rot180 -> swap_uv -> flip_v/flip_u）
+  sort_by_angle: true
+  rot180: false
+  swap_uv: false
+  flip_u: false
+  flip_v: false
+
+  # 三联图导出的 z 切片（noisy/pred/gt 同切片对比）
+  slices: ["mid", 128, 384]
+

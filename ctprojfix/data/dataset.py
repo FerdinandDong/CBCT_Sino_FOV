@@ -22,7 +22,7 @@ except Exception:
 from collections import OrderedDict
 
 
-# ---------- 基础工具 ----------
+# 工具组模块
 
 def _discover_ids(root_noisy, root_clean):
     """
@@ -71,12 +71,22 @@ def _read_tif_frame(path, a):
 
 
 def _percentile_norm(x, p1=1.0, p99=99.0, eps=1e-6):
-    """按百分位归一化到 [0,1]"""
+    """按百分位归一化到 [0,1]（老实现，保留以保持兼容）"""
     lo, hi = np.percentile(x, [p1, p99])
     if hi - lo < eps:
         return np.zeros_like(x, dtype=np.float32)
     y = (x - lo) / (hi - lo)
     return np.clip(y, 0.0, 1.0).astype(np.float32)
+
+def _percentile_norm_stats(x, p1=1.0, p99=99.0, eps=1e-6):
+    """按百分位归一化到 [0,1]，同时返回 (lo, hi) 以便后续反归一化"""
+    lo, hi = np.percentile(x, [p1, p99])
+    if hi - lo < eps:
+        y = np.zeros_like(x, dtype=np.float32)
+    else:
+        y = (x - lo) / (hi - lo)
+        y = np.clip(y, 0.0, 1.0).astype(np.float32)
+    return y, float(lo), float(hi)
 
 
 def _make_mask_fixed(H, W, left, right):
@@ -101,8 +111,9 @@ def _make_mask_auto_nonzero(noisy):
 
 
 # ---------- DummyDataset ----------
+
 class DummyDataset(Dataset):
-    def __init__(self, length=8, H=256, W=384,
+    def __init__(self, length=8, H=960, W=1240,
                  truncate_left=64, truncate_right=64,
                  add_angle_channel=False):
         self.length = int(length)
@@ -139,18 +150,17 @@ class DummyDataset(Dataset):
 
 
 # ---------- ProjectionAnglesDataset ----------
+
 class ProjectionAnglesDataset(Dataset):
     """
     逐角度 2D 样本：
       noisy: projectionNoisy{ID}.tif (A,H,W) 或 (H,W)
       clean: projection{ID}.tif      (A,H,W) 或 (H,W)
 
-    新增：
-      - cache_strategy: "none" | "lru" | "per_id"
-        * none：完全不缓存（最稳最省内存）
-        * lru：按 id 做 LRU 缓存（默认 2 个 id）
-        * per_id：整叠缓存（占内存大；不建议多进程时用）
-      - max_cached_ids: lru 模式下最多缓存的 id 数
+    可选开关（向后兼容）：
+      - return_norm_stats: bool（默认 False）
+        * False：行为与旧版本完全一致（训练不受影响）
+        * True：额外返回每帧的 noisy_lo/noisy_hi/gt_lo/gt_hi 四个标量
     """
     def __init__(self, cfg):
         # 路径
@@ -172,6 +182,9 @@ class ProjectionAnglesDataset(Dataset):
         self.mask_mode = str(cfg.get("mask_mode", "fixed")).lower()
         self.normalize = str(cfg.get("normalize", "percentile")).lower()
         self.add_angle_channel = bool(cfg.get("add_angle_channel", False))
+
+        # 仅评估时会打开；训练默认 False
+        self.return_norm_stats = bool(cfg.get("return_norm_stats", False))
 
         # 缓存策略
         self.cache_strategy = str(cfg.get("cache_strategy", "lru")).lower()  # "none"|"lru"|"per_id"
@@ -285,13 +298,17 @@ class ProjectionAnglesDataset(Dataset):
         L_eff = int(round(self.truncate_left  / ds))
         R_eff = int(round(self.truncate_right / ds))
 
-        # 归一化
+        # 归一化（是否返回统计由 return_norm_stats 决定；默认 False 以保持训练兼容）
         if self.normalize == "percentile":
-            noisy_n = _percentile_norm(noisy)
-            clean_n = _percentile_norm(clean)
+            if self.return_norm_stats:
+                noisy_n, n_lo, n_hi = _percentile_norm_stats(noisy)
+                clean_n, g_lo, g_hi = _percentile_norm_stats(clean)
+            else:
+                noisy_n = _percentile_norm(noisy); n_lo, n_hi = 0.0, 1.0
+                clean_n = _percentile_norm(clean); g_lo, g_hi = 0.0, 1.0
         else:
-            noisy_n = noisy.astype(np.float32, copy=False)
-            clean_n = clean.astype(np.float32, copy=False)
+            noisy_n = noisy.astype(np.float32, copy=False); n_lo, n_hi = 0.0, 1.0
+            clean_n = clean.astype(np.float32, copy=False); g_lo, g_hi = 0.0, 1.0
 
         # mask
         if self.mask_mode == "fixed":
@@ -319,10 +336,21 @@ class ProjectionAnglesDataset(Dataset):
             "A": torch.tensor(A, dtype=torch.long),
             "id": id_,
         }
+
+        # 仅在评估开关打开时附加统计量（训练不会看到）
+        if self.return_norm_stats:
+            sample.update({
+                "noisy_lo": torch.tensor(n_lo, dtype=torch.float32),
+                "noisy_hi": torch.tensor(n_hi, dtype=torch.float32),
+                "gt_lo":    torch.tensor(g_lo, dtype=torch.float32),
+                "gt_hi":    torch.tensor(g_hi, dtype=torch.float32),
+            })
+
         return sample
 
 
 # ---------- DataLoader 构造 ----------
+
 def make_dataloader(cfg):
     """
     读取 cfg 并构造 DataLoader。

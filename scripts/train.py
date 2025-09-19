@@ -1,7 +1,7 @@
 # scripts/train.py
 import argparse, yaml
 
-# 触发模型注册（别删）
+# 触发模型注册
 import ctprojfix.models.unet
 import ctprojfix.models.unet_res
 import ctprojfix.models.pconv_unet
