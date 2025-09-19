@@ -1,7 +1,8 @@
 # scripts/train.py
 import argparse, yaml
+from typing import Any
 
-# 触发模型注册
+# 触发模型注册（保持不变）
 import ctprojfix.models.unet
 import ctprojfix.models.unet_res
 import ctprojfix.models.pconv_unet
@@ -25,12 +26,27 @@ def main():
     args = ap.parse_args()
     cfg = load_cfg(args.cfg)
 
-    # 统一取一遍 train 配置，避免分支里重复取/漏取
-    tr = cfg.get("train", {})
+    tr = cfg.get("train", {})  # 统一取一遍 train 配置
 
     # 模型 & 数据
-    model = build_model(cfg["model"]["name"], **cfg["model"]["params"])
-    loader = make_dataloader(cfg["data"])
+    model = build_model(cfg["model"]["name"], **cfg["model"]["params"])  # 原样
+    loaders: Any = make_dataloader(cfg["data"])  # 可能返回 DataLoader 或 dict  # 兼容三分
+
+    # 兼容 {train,val,test} 字典或单个 DataLoader
+    if isinstance(loaders, dict):
+        train_loader = loaders.get("train")
+        val_loader = loaders.get("val")
+        test_loader = loaders.get("test")  # 目前未在训练中使用，仅保留占位
+        try:
+            n_tr = len(train_loader.dataset)
+            n_va = len(val_loader.dataset) if val_loader is not None else 0
+            n_te = len(test_loader.dataset) if test_loader is not None else 0
+            print(f"[DATA] split sizes -> train:{n_tr}  val:{n_va}  test:{n_te}")
+        except Exception:
+            pass
+    else:
+        train_loader = loaders
+        val_loader = None
 
     name = str(cfg["model"]["name"]).lower().strip()
 
@@ -76,7 +92,12 @@ def main():
         )
 
     print(f"[DEBUG] using trainer: {type(trainer).__name__}")
-    trainer.fit(model, loader)
+
+    # 优先调用支持 val_loader 的新签名；否则回退老签名
+    try:
+        trainer.fit(model, train_loader, val_loader)  # 传入验证集
+    except TypeError:
+        trainer.fit(model, train_loader)              # 兼容旧实现
 
 
 if __name__ == "__main__":

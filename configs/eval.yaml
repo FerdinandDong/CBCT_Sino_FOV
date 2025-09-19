@@ -20,7 +20,7 @@ data:
   # 真实数据
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
-  ids: [0]
+  ids: [10]
   step: 1
   downsample: 1
   truncate_left: 350
@@ -36,7 +36,7 @@ data:
 
 eval:
   device: cuda
-  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_epoch162.pth
+  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_epoch5.pth
   out_dir: outputs/eval_pconv
   show_idx: mid
   

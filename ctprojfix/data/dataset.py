@@ -2,7 +2,7 @@
 import os, re, glob
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset  # >>> split: Subset
 
 # 逐帧稳定读取（优先 tifffile；否则回退到 imageio）
 try:
@@ -77,6 +77,7 @@ def _percentile_norm(x, p1=1.0, p99=99.0, eps=1e-6):
         return np.zeros_like(x, dtype=np.float32)
     y = (x - lo) / (hi - lo)
     return np.clip(y, 0.0, 1.0).astype(np.float32)
+
 
 def _percentile_norm_stats(x, p1=1.0, p99=99.0, eps=1e-6):
     """按百分位归一化到 [0,1]，同时返回 (lo, hi) 以便后续反归一化"""
@@ -168,11 +169,15 @@ class ProjectionAnglesDataset(Dataset):
         self.root_clean = cfg.get("root_clean")
         ids_cfg = cfg.get("ids", None)
 
-        # 自动发现 ids
+        # 自动发现 ids + 排除列表  # >>> split: exclude_ids 支持
         if ids_cfg in (None, [], "all", "ALL"):
-            self.ids = _discover_ids(self.root_noisy, self.root_clean)
+            ids = _discover_ids(self.root_noisy, self.root_clean)
         else:
-            self.ids = list(ids_cfg)
+            ids = list(ids_cfg)
+        exclude = set(cfg.get("exclude_ids", []))
+        if exclude:
+            ids = [i for i in ids if i not in exclude]
+        self.ids = ids
 
         # 基本参数
         self.step = int(cfg.get("step", 1))
@@ -349,20 +354,109 @@ class ProjectionAnglesDataset(Dataset):
         return sample
 
 
+# ---------- Split 辅助（files/ratio） ----------  # >>> split
+
+def _read_list_file(path):  # >>> split
+    items = []
+    with open(path, 'r', encoding='utf-8') as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln or ln.startswith('#'):
+                continue
+            items.append(ln)
+    return items
+
+
+def _make_index_keys(ds: ProjectionAnglesDataset):  # >>> split
+    """统一索引键："id,a"（角度级别）。"""
+    return [f"{id_},{a}" for (id_, a, A) in ds.index]
+
+
+def _subset_indices_from_files(ds: ProjectionAnglesDataset, split_cfg):  # >>> split
+    list_format = str(split_cfg.get('list_format', 'id')).lower()
+    keys = _make_index_keys(ds)
+    # 按 ID 聚类，便于快捷选择
+    by_id = {}
+    for pos, k in enumerate(keys):
+        sid, sa = k.split(',')
+        by_id.setdefault(sid, []).append((pos, int(sa)))
+
+    def collect(path):
+        lines = _read_list_file(path)
+        if list_format == 'id':
+            pos = []
+            for sid in lines:
+                if sid in by_id:
+                    pos.extend([p for (p, _) in by_id[sid]])
+            return sorted(pos)
+        elif list_format in ('id_a', 'id,angle'):
+            want = set(lines)
+            return sorted([i for i, k in enumerate(keys) if k in want])
+        else:
+            raise ValueError(f"Unknown list_format: {list_format}")
+
+    return (
+        collect(split_cfg['train_list']),
+        collect(split_cfg['val_list']),
+        collect(split_cfg['test_list']),
+    )
+
+
+def _subset_indices_by_ratio(ds: ProjectionAnglesDataset, split_cfg):  # >>> split
+    rng = np.random.default_rng(int(split_cfg.get('seed', 2024)))
+    keys = _make_index_keys(ds)
+    group_by = str(split_cfg.get('group_by', 'id')).lower()
+
+    if group_by == 'none':
+        idx = np.arange(len(keys))
+        rng.shuffle(idx)
+        n = len(idx)
+        n_tr = int(n * float(split_cfg.get('train', 0.8)))
+        n_va = int(n * float(split_cfg.get('val', 0.1)))
+        tr = idx[:n_tr].tolist()
+        va = idx[n_tr:n_tr+n_va].tolist()
+        te = idx[n_tr+n_va:].tolist()
+        return sorted(tr), sorted(va), sorted(te)
+
+    # group_by = 'id'：按体 ID 分组
+    groups = {}
+    for pos, k in enumerate(keys):
+        sid = k.split(',')[0]
+        groups.setdefault(sid, []).append(pos)
+    gids = list(groups.keys())
+    rng.shuffle(gids)
+    n = len(gids)
+    n_tr = int(n * float(split_cfg.get('train', 0.8)))
+    n_va = int(n * float(split_cfg.get('val', 0.1)))
+    g_tr = set(gids[:n_tr])
+    g_va = set(gids[n_tr:n_tr+n_va])
+    g_te = set(gids[n_tr+n_va:])
+    tr = [p for g in g_tr for p in groups[g]]
+    va = [p for g in g_va for p in groups[g]]
+    te = [p for g in g_te for p in groups[g]]
+    return sorted(tr), sorted(va), sorted(te)
+
+
 # ---------- DataLoader 构造 ----------
 
 def make_dataloader(cfg):
     """
     读取 cfg 并构造 DataLoader。
-    新增可选参数：
-      - persistent_workers: bool（默认 True 当 num_workers>0 时）
-      - prefetch_factor: int（默认 2，仅当 num_workers>0 时生效）
+    支持：
+      - split: files | ratio（返回 {train,val,test} 字典）
+      - 无 split：返回单个 DataLoader（兼容旧代码）
+      - persistent_workers / prefetch_factor
+      - exclude_ids: [0,10,11]
     """
     use_dummy = bool(cfg.get("use_dummy", False))
     bs = int(cfg.get("batch_size", 1))
     nw = int(cfg.get("num_workers", 0))
     pin = bool(cfg.get("pin_memory", False))
 
+    persistent_workers = bool(cfg.get("persistent_workers", (nw > 0)))
+    prefetch_factor = int(cfg.get("prefetch_factor", 2))
+
+    # Dummy：保持单 Loader 行为
     if use_dummy:
         ds = DummyDataset(length=cfg.get("dummy_length", 8),
                           H=cfg.get("dummy_H", 256),
@@ -370,20 +464,46 @@ def make_dataloader(cfg):
                           truncate_left=cfg.get("truncate_left", 64),
                           truncate_right=cfg.get("truncate_right", 64),
                           add_angle_channel=cfg.get("add_angle_channel", False))
+        dl_kwargs = dict(batch_size=bs, shuffle=True, num_workers=nw,
+                         pin_memory=pin, drop_last=False)
+        if nw > 0:
+            dl_kwargs.update({"persistent_workers": persistent_workers,
+                              "prefetch_factor": max(2, prefetch_factor)})
+        return DataLoader(ds, **dl_kwargs)
+
+    # 真数据：构建全量 Dataset
+    ds_full = ProjectionAnglesDataset(cfg)
+
+    split_cfg = cfg.get('split', None)
+    if not split_cfg:
+        # 没有 split：返回单 Loader（兼容旧训练脚本）
+        dl_kwargs = dict(batch_size=bs, shuffle=True, num_workers=nw,
+                         pin_memory=pin, drop_last=False)
+        if nw > 0:
+            dl_kwargs.update({"persistent_workers": persistent_workers,
+                              "prefetch_factor": max(2, prefetch_factor)})
+        return DataLoader(ds_full, **dl_kwargs)
+
+    # 有 split：生成三份子集
+    mode = str(split_cfg.get('mode', 'ratio')).lower()
+    if mode == 'files':
+        idx_tr, idx_va, idx_te = _subset_indices_from_files(ds_full, split_cfg)
+    elif mode == 'ratio':
+        idx_tr, idx_va, idx_te = _subset_indices_by_ratio(ds_full, split_cfg)
     else:
-        ds = ProjectionAnglesDataset(cfg)
+        raise ValueError(f"Unknown split mode: {mode}")
 
-    persistent_workers = bool(cfg.get("persistent_workers", (nw > 0)))
-    prefetch_factor = int(cfg.get("prefetch_factor", 2))
-    dl_kwargs = dict(
-        batch_size=bs,
-        shuffle=True,
-        num_workers=nw,
-        pin_memory=pin,
-        drop_last=False,
-    )
+    ds_tr = Subset(ds_full, idx_tr)
+    ds_va = Subset(ds_full, idx_va)
+    ds_te = Subset(ds_full, idx_te)
+
+    common = dict(num_workers=nw, pin_memory=pin, drop_last=False)
     if nw > 0:
-        dl_kwargs["persistent_workers"] = persistent_workers
-        dl_kwargs["prefetch_factor"] = max(2, prefetch_factor)
+        common.update({"persistent_workers": persistent_workers,
+                       "prefetch_factor": max(2, prefetch_factor)})
 
-    return DataLoader(ds, **dl_kwargs)
+    train_loader = DataLoader(ds_tr, batch_size=bs, shuffle=True,  **common)
+    val_loader   = DataLoader(ds_va, batch_size=int(cfg.get('val_batch_size', bs)),  shuffle=False, **common)
+    test_loader  = DataLoader(ds_te, batch_size=int(cfg.get('test_batch_size', bs)), shuffle=False, **common)
+
+    return {"train": train_loader, "val": val_loader, "test": test_loader}

@@ -13,6 +13,9 @@ data:
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
   ids: [] # null #[] #  ids: null 全部文件 
+
+  exclude_ids: [0, 10, 11] # !!!! 注意!!!!!!!!!!根据testxt修改排除test 严格隔离
+
   step: 1
   downsample: 1
   truncate_left: 350
@@ -30,7 +33,17 @@ data:
 
   # DataLoader 行为
   persistent_workers: true
-  prefetch_factor: 2      # 每个 worker 预取多少个 batch 2*4 = 8
+  prefetch_factor: 2      # 每个 worker 预取多少个 batch 2*4 = 8 加速用
+
+  split:
+    mode: files               # 或 ratio 想一下无txt
+    list_format: id
+    train_list: splits/train.txt
+    val_list:   splits/val.txt
+    test_list:  splits/test.txt
+
+  val_batch_size: 8
+  test_batch_size: 8
 
 train:
   device: cuda
@@ -44,7 +57,7 @@ train:
   resume: "auto"               # "auto"=从目录最新的接着训；可填具体路径；false不续训
   strict_load: true            # 恢复模型 state_dict 的严格模式
 
-  resume_from: checkpoints/pconv_unet/pconv_unet_epoch150.pth
+  resume_from: checkpoints/pconv_unet/pconv_unet_epoch5.pth
   reset_epoch: true
   reset_optim: true            # 恢复时是否重置 epoch 和优化器+强指定
 
@@ -68,3 +81,7 @@ train:
       w_l1_valid: 0.01
       use_l2: true
       w_l2: 1.0
+
+
+  val_metric: loss   # 或 psnr / ssim / None
+  # maximize_metric: false  # 当 val_metric=loss 时自动设为 False
