@@ -1,6 +1,6 @@
 # ctprojfix/trainers/supervised.py
 import os, re, glob, sys
-import numpy as np  # ★ 新增
+import numpy as np 
 import torch
 import torch.nn.functional as F
 from torch.optim import Adam
@@ -61,6 +61,8 @@ class SupervisedTrainer:
         # 验证指标控制：loss | psnr | ssim | None
         val_metric: str | None = "psnr",
         maximize_metric: bool | None = None,  # None -> 根据指标自动选择
+        # 学习率调度配置（dict 或 None）
+        sched=None,
     ):
         # 设备 & 超参
         self.device = torch.device(device if torch.cuda.is_available() else "cpu") \
@@ -96,13 +98,15 @@ class SupervisedTrainer:
 
         # 验证 & best
         self.val_metric = None if val_metric is None else str(val_metric).lower()
-        # 自动决定“越大越好/越小越好”
         if maximize_metric is None:
             self.maximize_metric = False if self.val_metric == "loss" else True
         else:
             self.maximize_metric = bool(maximize_metric)
         self.best_metric = None
         self.best_epoch = None
+
+        # 学习率调度
+        self.sched_cfg = sched or {}
 
     # ---------- ckpt 命名/保存/加载 ----------
     def _ckpt_name(self, model, epoch: int):
@@ -163,13 +167,44 @@ class SupervisedTrainer:
         torch.save(payload, path)
         print(f"[CKPT] saved BEST -> {path}  (metric={metric_value:.4f} @ epoch {epoch})", flush=True)
 
-    # ---------- 训练主循环 ----------
+    # 并快进调度器
+    def _build_scheduler(self, opt, start_epoch):
+        sc = self.sched_cfg
+        if not sc or not sc.get("type"):
+            return None
+        t = str(sc.get("type")).lower()
+        scheduler = None
+        if t == "cosine":
+            from torch.optim.lr_scheduler import CosineAnnealingLR
+            T_max = int(sc.get("T_max", self.epochs))
+            eta_min = float(sc.get("eta_min", 1e-6))
+            scheduler = CosineAnnealingLR(opt, T_max=T_max, eta_min=eta_min)
+        elif t == "step":
+            from torch.optim.lr_scheduler import StepLR
+            step_size = int(sc.get("step_size", 50))
+            gamma = float(sc.get("gamma", 0.5))
+            scheduler = StepLR(opt, step_size=step_size, gamma=gamma)
+        else:
+            print(f"[SCHED] unknown type: {t} -> disabled", flush=True)
+            return None
+
+        # 若从中间 epoch 恢复，按已完成的 epoch 数快进
+        if start_epoch > 1:
+            for _ in range(1, start_epoch):
+                scheduler.step()
+        print(f"[SCHED] enabled: {t} | lr0={opt.param_groups[0]['lr']:.2e}", flush=True)
+        return scheduler
+
+    # 训练主循环
     def fit(self, model, loader, val_loader=None):  # 兼容：val_loader 可为 None
         model = model.to(self.device)
         opt = Adam(model.parameters(), lr=self.lr)
 
         # 续训
         start_epoch = self._try_resume(model, opt)
+
+        # 构建调度器start_epoch
+        scheduler = self._build_scheduler(opt, start_epoch)
 
         print("device:", self.device, "current_id:", self.device_current_id, flush=True)
 
@@ -203,12 +238,14 @@ class SupervisedTrainer:
                 losses.append(float(loss.detach().cpu()))
 
                 if not self._tqdm_disable:
-                    data_iter.set_postfix(loss=f"{loss.item():.4f}")
+                    data_iter.set_postfix(loss=f"{loss.item():.4f}", lr=f"{opt.param_groups[0]['lr']:.2e}")  # tqdm 显示
                 elif self.log_interval and (step % self.log_interval == 0):
-                    print(f"[Epoch {epoch} | Step {step}/{len(loader)}] loss={loss.item():.4f}", flush=True)
+                    print(f"[Epoch {epoch} | Step {step}/{len(loader)}] "
+                          f"loss={loss.item():.4f} lr={opt.param_groups[0]['lr']:.2e}", flush=True)
 
+            lr_now = opt.param_groups[0]['lr']  # 当前学习率
             mean_loss = sum(losses) / max(1, len(losses))
-            print(f"Epoch {epoch} mean loss: {mean_loss:.4f}", flush=True)
+            print(f"Epoch {epoch} mean loss: {mean_loss:.4f} | lr={lr_now:.6g}", flush=True)  
 
             # 验证与 best
             did_val = False
@@ -224,7 +261,11 @@ class SupervisedTrainer:
             if did_val and (self.best_metric is not None):
                 print(f"[BEST] metric={self.best_metric:.4f} @ epoch {self.best_epoch}", flush=True)
 
-    # ---------- 验证 ----------
+            # epoch 末更新调度器
+            if scheduler is not None:
+                scheduler.step()
+
+    # 验证与 best 维护
     @torch.no_grad()
     def _validate_and_maybe_save_best(self, model, val_loader, epoch: int):
         model.eval()
@@ -238,7 +279,7 @@ class SupervisedTrainer:
             y = batch["gt"].to(self.device, non_blocking=True)
             pred = model(x)
 
-            # —— 验证 loss：与训练完全一致 —— 
+            # 验证 loss与训练完全一致
             if getattr(model, "expects_mask", False):
                 M = x[:, 1:2]
             else:
@@ -249,7 +290,7 @@ class SupervisedTrainer:
                 loss = self.criterion(pred, y)
             losses.append(float(loss.detach().cpu()))
 
-            # —— 指标：在 [0,1] 域上 —— 
+            # 指标在 [0,1] 域上
             p_clamp = torch.clamp(pred, 0.0, 1.0)
             y_clamp = torch.clamp(y,    0.0, 1.0)
             p_np = p_clamp.detach().cpu().numpy()

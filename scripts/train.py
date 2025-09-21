@@ -30,7 +30,7 @@ def main():
 
     # 模型 & 数据
     model = build_model(cfg["model"]["name"], **cfg["model"]["params"])  # 原样
-    loaders: Any = make_dataloader(cfg["data"])  # 可能返回 DataLoader 或 dict  # 兼容三分
+    loaders: Any = make_dataloader(cfg["data"])  # 可能返回 DataLoader 或 dict（支持三分）
 
     # 兼容 {train,val,test} 字典或单个 DataLoader
     if isinstance(loaders, dict):
@@ -89,6 +89,10 @@ def main():
             # ---- 日志选项 ----
             use_tqdm=bool(tr.get("use_tqdm", True)),
             log_interval=tr.get("log_interval", None),
+
+            # 验证指标与 LR 调度 其余走默认自动
+            val_metric=tr.get("val_metric", "psnr"),   # loss | psnr | ssim | None
+            sched=tr.get("sched", None),               # e.g. {type: cosine, T_max: 150, eta_min: 1e-6}
         )
 
     print(f"[DEBUG] using trainer: {type(trainer).__name__}")

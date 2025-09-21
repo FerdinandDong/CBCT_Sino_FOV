@@ -20,7 +20,7 @@ data:
   # 真实数据
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
-  ids: [10]
+  ids: [10] #确认一下 只有 10 在测试集
   step: 1
   downsample: 1
   truncate_left: 350
@@ -35,8 +35,8 @@ data:
   return_norm_stats: true
 
 eval:
-  device: cuda
-  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_epoch5.pth
+  device: "cuda:1"     # cuda / cpu / cuda:0 / cuda:1 ...
+  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_best.pth
   out_dir: outputs/eval_pconv
   show_idx: mid
   
@@ -71,7 +71,7 @@ recon3d:
   ODD: 300.0          # object-to-detector distance
   vol_shape: [512, 512, 512]  # [Z,Y,X]
   filter: "ram-lak"    # ram-lak | shepp-logan | cosine | hamming | hann
-  gpu: 0
+  gpu: 1
 
 
   angle_direction: -1       # 先1 条纹呈扇形反向扩散，试 -1

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 - 维持原有评估/指标/三联图逻辑；
-- **不再逐张保存 pred_00000.* 文件**（相关语句已以 `#` 注释）；
-- 新增：一次性导出整卷预测（pred_volume.*），并可选整卷导出 GT / Noisy；
+- 不再逐张保存 pred_00000；
+- 一次性导出整卷预测（pred_volume.*），并可选整卷导出 GT / Noisy；
 - 若 batch 提供 lo/hi 标注，额外导出 RAW 域整卷（*_raw.*）。
   eval:
     save_volume: true        # 是否导出整卷预测（默认 true）
@@ -30,6 +30,45 @@ from ctprojfix.models.registry import build_model
 from ctprojfix.data.dataset import make_dataloader, DummyDataset
 from ctprojfix.evals.metrics import psnr, ssim
 
+# 更灵活的 device 解析
+def _resolve_device(cfg_eval: dict, cli_device: str | None, cli_gpu: str | int | None) -> torch.device:
+    """
+    优先级：--device > --gpu > cfg.eval.device > auto
+      --device: 例如 "cuda:1" / "cpu"
+      --gpu:    整数索引（等价于 device=f"cuda:{idx}"）
+    """
+    # 1) CLI --device
+    if cli_device:
+        d = str(cli_device).strip().lower()
+        if d == "cpu" or (d.startswith("cuda") and torch.cuda.is_available()):
+            return torch.device(d)
+        # 容错：传了 "cuda" 但当前不可用 → 退回 cpu
+        return torch.device("cuda" if (d.startswith("cuda") and torch.cuda.is_available()) else "cpu")
+
+    # 2) CLI --gpu
+    if cli_gpu is not None:
+        try:
+            idx = int(cli_gpu)
+            if torch.cuda.is_available():
+                return torch.device(f"cuda:{idx}")
+        except Exception:
+            pass
+        return torch.device("cpu")
+
+    # 3) cfg.eval.device
+    d = str(cfg_eval.get("device", "") or "").strip().lower()
+    if d:
+        if d == "cpu":
+            return torch.device("cpu")
+        if d.startswith("cuda"):
+            if torch.cuda.is_available():
+                return torch.device(d)
+            else:
+                print("[WARN] cfg.eval.device 要求 CUDA，但本机不可用，退回 CPU。")
+                return torch.device("cpu")
+
+    # 4) auto
+    return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def load_cfg(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -107,15 +146,32 @@ def main():
     ap.add_argument("--save-volume", type=str, default=None, help="是否输出整体 3D 文件 (true/false)")
     ap.add_argument("--save-format", type=str, default=None, choices=["npy","tiff","both"], help="体数据输出格式")
     ap.add_argument("--save-gt-noisy", type=str, default=None, help="是否同时导出 GT/Noisy 整卷 (true/false)")
+
+
+    #设备选择
+    ap.add_argument("--device", type=str, default=None, help='计算设备，如 "cuda:0" / "cuda:1" / "cpu"')
+    ap.add_argument("--gpu", type=str, default=None, help="GPU 编号（等价于 --device cuda:{idx}）")
     args = ap.parse_args()
 
     cfg = load_cfg(args.cfg)
+    eval_cfg = cfg.get("eval", {})
+    print(f"[CFG] loaded config from {args.cfg}")
 
-    device = torch.device(cfg.get("eval",{}).get("device", "cuda") if torch.cuda.is_available() else "cpu")
+    device = _resolve_device(eval_cfg, args.device, args.gpu)
+    if device.type == "cuda":
+        try:
+            torch.cuda.set_device(device)  #将当前 CUDA 上下文切到该卡
+        except Exception as e:
+            print(f"[WARN] torch.cuda.set_device 失败：{e}")
+
+    print(f"[DEVICE] using device = {device}", flush=True)
+
+
+    # device = torch.device(cfg.get("eval",{}).get("device", "cuda") if torch.cuda.is_available() else "cpu")
 
     # 模型
     model = build_model(cfg["model"]["name"], **cfg["model"]["params"]).to(device)
-    model = load_checkpoint(model, cfg.get("eval",{}).get("ckpt", ""), device)
+    model = load_checkpoint(model, eval_cfg.get("ckpt", ""), device)
     model.eval()
 
     # 数据（评估时建议在 cfg.data 里加 return_norm_stats: true）
@@ -134,7 +190,6 @@ def main():
         loader = DataLoader(dummy, batch_size=cfg["data"].get("batch_size", 1), shuffle=False, num_workers=0)
 
     # 输出
-    eval_cfg = cfg.get("eval", {})
     save_dir = eval_cfg.get("out_dir", "outputs/eval")
     os.makedirs(save_dir, exist_ok=True)
     trip_dir = os.path.join(save_dir, "figs")
@@ -173,7 +228,7 @@ def main():
 
         with torch.no_grad():
             for batch in tqdm(loader, desc="Eval"):
-                x = batch["inp"].to(device)  # 约定：x[:,0]=noisy, x[:,1]=mask, x[:,2]=angle(可选)
+                x = batch["inp"].to(device)  # 约定：x[:,0]=noisy, x[:,1]=mask, x[:,2]=angle
                 y = batch["gt"].to(device)   # (B,1,H,W)
                 pred = model(x)
 
@@ -268,7 +323,7 @@ def main():
                 tiff.imwrite(os.path.join(save_dir, "pred_volume_raw.tiff"), vol_raw, imagej=True)
             print(f"[OK] 预测体(RAW域) 已保存: pred_volume_raw.npy / pred_volume_raw.tiff  形状={vol_raw.shape}")
 
-        # 新增：GT / Noisy cfg决定
+        # GT / Noisy cfg决定
         if save_gt_noisy:
             if len(gts_all) > 0:
                 vol_gt = np.stack(gts_all, axis=0).astype(np.float32)

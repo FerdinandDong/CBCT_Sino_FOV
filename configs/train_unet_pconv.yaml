@@ -47,8 +47,20 @@ data:
 
 train:
   device: cuda
-  epochs: 200
+  epochs: 150
   lr: 3e-4
+  sched:
+    type: cosine      # cosine | step
+    T_max: 150        # epochs 一致
+    eta_min: 1e-6
+
+
+  # sched:
+  #   type: cosine   # cosine | step
+  #   eta_min: 1e-6  # 仅 cosine
+  #   step_size: 50  # 仅 step
+  #   gamma: 0.5     # 仅 step
+
   ckpt_dir: checkpoints/pconv_unet
   ckpt_prefix: pconv_unet      # 文件名前缀，可选；默认用模型类名
   save_every: 1                # 每多少 epoch 存一次
@@ -57,7 +69,7 @@ train:
   resume: "auto"               # "auto"=从目录最新的接着训；可填具体路径；false不续训
   strict_load: true            # 恢复模型 state_dict 的严格模式
 
-  resume_from: checkpoints/pconv_unet/pconv_unet_epoch5.pth
+  resume_from: checkpoints/pconv_unet/pconv_unet_epoch7.pth
   reset_epoch: true
   reset_optim: true            # 恢复时是否重置 epoch 和优化器+强指定
 

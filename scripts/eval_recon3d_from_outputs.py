@@ -46,7 +46,7 @@ def read_angles_from_csv(csv_path, A_default=360, return_index=False):
     return (ang, A, a) if return_index else (ang, A)
 
 
-# ------------------ 体堆栈读取（新：整卷优先） ------------------
+# 体堆栈读取整卷优先 
 
 PRIORITY_SETS = [
     ("_raw.npy", np.load),
@@ -133,7 +133,7 @@ def dedup_by_angle(a_idx, angles, tol_rad):
     return np.array(keep, dtype=np.int32)
 
 
-# ------------------ 简单体指标/可视化 ------------------
+# 简单体指标/可视化
 
 def ssim2d(x, y, dr=1.0, K1=0.01, K2=0.03, sigma=1.5):
     C1, C2 = (K1*dr)**2, (K2*dr)**2
@@ -200,7 +200,7 @@ def save_axial_triptych(vol_noisy, vol_pred, vol_gt, z_indices, out_dir, tag="")
 
 # ------------------ ASTRA FDK ------------------
 
-def run_fdk(sino_TVU, vol_shape_zyx, du, dv, det_u, det_v, angles_rad, SOD, ODD, gpu=0, filt="ram-lak"):
+def run_fdk(sino_TVU, vol_shape_zyx, du, dv, det_u, det_v, angles_rad, SOD, ODD, gpu, filt="ram-lak"):
     nx, ny, nz = int(vol_shape_zyx[2]), int(vol_shape_zyx[1]), int(vol_shape_zyx[0])
     vg = astra.create_vol_geom(nx, ny, nz)
 
