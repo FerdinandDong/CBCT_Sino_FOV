@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 import astra
 
-# ------------------ IO & CFG ------------------
+# IO & CFG  & 读角度    
 
 def load_cfg(path):
     with open(path, "r", encoding="utf-8") as f:
@@ -198,7 +198,7 @@ def save_axial_triptych(vol_noisy, vol_pred, vol_gt, z_indices, out_dir, tag="")
         print(f"[FIG] {fp}")
 
 
-# ------------------ ASTRA FDK ------------------
+# ASTRA FDK
 
 def run_fdk(sino_TVU, vol_shape_zyx, du, dv, det_u, det_v, angles_rad, SOD, ODD, gpu, filt="ram-lak"):
     nx, ny, nz = int(vol_shape_zyx[2]), int(vol_shape_zyx[1]), int(vol_shape_zyx[0])
@@ -231,7 +231,7 @@ def run_fdk(sino_TVU, vol_shape_zyx, du, dv, det_u, det_v, angles_rad, SOD, ODD,
     return vol, dt
 
 
-# ------------------ 主流程 ------------------
+# main
 
 def main():
     ap = argparse.ArgumentParser()
@@ -250,7 +250,7 @@ def main():
     os.makedirs(save_dir, exist_ok=True)
     csv_path = os.path.join(from_dir, recon.get("metrics_csv", "metrics.csv"))
 
-    # 新：优先读整卷文件
+    # 优先读整卷文件
     pred_file = args.pred or recon.get("pred_file")
     gt_file   = args.gt   or recon.get("gt_file")
     noz_file  = args.noisy or recon.get("noisy_file")

@@ -42,7 +42,7 @@ def _resolve_device(cfg_eval: dict, cli_device: str | None, cli_gpu: str | int |
         d = str(cli_device).strip().lower()
         if d == "cpu" or (d.startswith("cuda") and torch.cuda.is_available()):
             return torch.device(d)
-        # 容错：传了 "cuda" 但当前不可用 → 退回 cpu
+        # 容错, 传了 "cuda" 但当前不可用 → 退回 cpu
         return torch.device("cuda" if (d.startswith("cuda") and torch.cuda.is_available()) else "cpu")
 
     # 2) CLI --gpu
@@ -142,7 +142,7 @@ def _get_bool(val, default=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cfg", default="configs/eval.yaml", help="评估配置")
-    # 新增是否保存体数据的控制开关
+    # 是否保存体数据的控制开关
     ap.add_argument("--save-volume", type=str, default=None, help="是否输出整体 3D 文件 (true/false)")
     ap.add_argument("--save-format", type=str, default=None, choices=["npy","tiff","both"], help="体数据输出格式")
     ap.add_argument("--save-gt-noisy", type=str, default=None, help="是否同时导出 GT/Noisy 整卷 (true/false)")
@@ -259,7 +259,7 @@ def main():
                     # plt.imsave(os.path.join(save_dir, f"gt_{img_count:05d}.png"),   g, cmap="gray", vmin=0, vmax=1)  #
                     # plt.imsave(os.path.join(save_dir, f"noisy_{img_count:05d}.png"),n, cmap="gray", vmin=0, vmax=1)  #
 
-                    # 修改：收集体数据（归一化域）
+                    # 收集体数据（归一化域）
                     preds_all.append(p.astype(np.float32))
                     ids_all.append(id_val)
                     if save_gt_noisy:
@@ -274,7 +274,7 @@ def main():
 
                     if (n_lo is not None) and (n_hi is not None) and (g_lo is not None) and (g_hi is not None):
                         pred_raw  = p * (g_hi - g_lo) + g_lo
-                        # 原本：逐张保存 RAW npy（注释掉，改为整卷写出）
+                        # 原本 逐张保存 RAW npy（注释掉，改为整卷写出）
                         # np.save(os.path.join(save_dir, f"pred_raw_{img_count:05d}.npy"),  pred_raw.astype(np.float32))  #
                         preds_raw_all.append(pred_raw.astype(np.float32))  # 修改：收集 RAW 体
 
