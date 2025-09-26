@@ -89,3 +89,16 @@ recon3d:
   # 三联图导出的 z 切片（noisy/pred/gt 同切片对比）
   slices: ["mid", 128, 384]
 
+  # WCE 水模等效 
+
+  wce:
+    enabled: true           # 打开 WCE 跑法
+    method: "hsieh"         # "gaussian" 或 "hsieh"
+    # Hsieh 参数 都有默认值
+    input_domain: "line"   # 已是线积分域line；强度intensity
+    trunc_left: 350
+    trunc_right: 350
+    edge_band: 16
+    clip_exp: 20.0
+    radius_px_cap: 4096
+    save_corr: false
