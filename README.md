@@ -3,7 +3,32 @@
 本项目旨在探索锥束 CT (CBCT) 投影截断 (sino truncation) 与视野扩展 (Field-of-View Extension, FOV) 的学习与重建方法，涵盖了 **Partial Convolution-UNet、扩散模型 (DDPM)** 以及 **基于水模 (WCE) 的传统外推 baseline**。
 
 ---
+### 示例结果可视化
 
+下面展示部分 `img/` 文件夹中的图像，用于帮助理解模型训练与重建效果：
+
+- **训练与评估曲线**  
+  - 学习率变化：  
+    ![Learning Rate](img/lr.png)  
+  - 从20轮预训练之后开始的150epoch训练 / 验证 Loss 曲线（纵轴放大至 0–3）：  
+    ![Train vs Val Loss](img/train_val_loss.png)  
+
+- **二维投影与重建三联图**  
+  - 单帧三联图（Noisy / Pred / GT + 误差）：  
+    ![Triptych Example](img/triptych_00180.png)  
+
+- **三维重建结果（Axial 切片）128/256/384 slice**  
+  - PConv - FDK 重建（截断投影 → FOV 扩展后）：  
+    ![FDK Axial Triptych z=128](img/axial_triptych_all_z0128.png)  
+    ![FDK Axial Triptych z=256](img/axial_triptych_all_z0256.png)  
+    ![FDK Axial Triptych z=384](img/axial_triptych_all_z0384.png)  
+
+  - Hsieh-WCE baseline 对比：  
+    ![WCE Hsieh Axial z=128](img/axial_triptych_wce_hsieh_all_z0128.png)  
+    ![WCE Hsieh Axial z=256](img/axial_triptych_wce_hsieh_all_z0256.png)  
+    ![WCE Hsieh Axial z=384](img/axial_triptych_wce_hsieh_all_z0384.png)  
+
+这些结果展示了在截断投影输入条件下，**PConv-UNet 模型**与 **传统 WCE 外推 baseline** 在 CBCT FOV 扩展任务中的对比效果。
 ## 当前代码结构（2025-09-25）
 
 ```
