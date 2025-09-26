@@ -1,3 +1,48 @@
+# CBCT_Sino_FOV
+
+本项目旨在探索锥束 CT (CBCT) 投影截断 (sino truncation) 与视野扩展 (Field-of-View Extension, FOV) 的学习与重建方法，涵盖了 **Partial Convolution-UNet、扩散模型 (DDPM)** 以及 **基于水模 (WCE) 的传统外推 baseline**。
+
+---
+
+## 当前代码结构（2025-09-25）
+
+```
+│ .gitignore
+│ pyproject.toml
+│ README.md
+│ requirements.txt
+│ setup.py
+│
+├─checkpoints/ # 权重保存（UNet/PConv-UNet/Diffusion）
+│
+├─configs/ # 训练 / 采样 / 评估配置
+│
+├─ctprojfix/ # 核心库
+│ ├─data/ # 数据集定义 (ProjectionAnglesDataset / DummyDataset)
+│ ├─evals/ # 指标 (PSNR / SSIM)
+│ ├─losses/ # 损失函数 (L1/L2/SSIM/感知/区域L1等)
+│ ├─models/ # 模型 (UNet, PConv-UNet, Diffusion-DDPM)
+│ ├─recon/ # 重建与基线方法
+│ │ ├─fdk_astra.py # FDK 重建 (ASTRA)
+│ │ ├─wce_baseline.py # 高斯水模外推 baseline
+│ │ ├─wce_hsieh.py # Hsieh 已知截断宽度的水模外推 (2004论文)
+│ ├─trainers/ # 训练器 (监督/扩散)
+│ ├─utils/ # 工具
+│
+├─outputs/ # 实验输出
+│
+├─scripts/ # 训练/评估/日志可视化工具
+│ ├─train.py # 统一训练入口
+│ ├─evaluate.py # 统一评估（指标+三联图+体数据导出）
+│ ├─eval_recon3d_from_outputs.py # 3D 重建与 WCE/FDK baseline 对比
+│ ├─plot_train_log.py # 日志解析+绘图+过拟合检测 python scripts/plot_train_log.py --log logs/train_pconv.log                                  --outdir outputs/logplots/pconv
+│ ├─sample_diffusion.py # 扩散模型采样
+│ ├─split_dataset.py # 数据划分工具
+│
+├─splits/ # 数据划分列表
+└─tests/ # 预留单元测试
+```
+
 ## 当前代码结构（2025-09-12）
 
 ```
@@ -192,6 +237,15 @@ python scripts/evaluate.py --cfg configs/eval.yaml
 
 ## Changelog
 
+### 2025-09-25
+- **整体结构**
+  - 新增 `ctprojfix/recon/wce_hsieh.py`：实现基于 Hsieh (2004) 的 **已知截断宽度 WCE 外推算法**。  
+  - 保留 `wce_baseline.py` 作为 Gaussian smoothing baseline。  
+  - 增加 `scripts/plot_train_log.py`：支持日志解析、PSNR/SSIM 单独绘图、Generalization Gap 可视化、稳健过拟合检测。  
+  - 调整 `evaluate.py`：支持一次性导出整卷预测（npy/tiff），并保存三联图与指标 CSV。  
+  - 项目目录结构更新，`ctprojfix/recon` 下集中存放所有重建与 baseline 模块。  
+
+---
 ### 2025-09-12
 - **模型**
   - 新增 ctprojfix/models/pconv_unet.py：基于 Partial Convolution 的 U-Net 变体
@@ -282,5 +336,10 @@ python scripts/evaluate.py --cfg configs/eval.yaml
    Medical Physics, 40(11), 111914.  
     提供了 CBCT 投影与重建的系统框架，尤其涉及截断/噪声建模与 FOV 扩展，是本项目中  
    `ctprojfix/data/dataset.py`（ProjectionAnglesDataset 与截断 mask 设计）的参考依据。
+
+3. **Hsieh, J., Chao, E., Thibault, J., Grekowicz, B., Horst, A., McOlash, S., & Myers, T. (2004).**  
+   *A novel reconstruction algorithm to extend the CT scan field-of-view*.  
+   Medical Physics, 31(9), 2385–2391.  
+   → 提出了基于水模外推 (WCE) 的 FOV 扩展方法，是 `ctprojfix/recon/wce_hsieh.py` 的核心实现参考。  
 
 ---
