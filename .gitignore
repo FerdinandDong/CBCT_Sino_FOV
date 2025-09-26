@@ -23,3 +23,11 @@ venv/
 *.mp4
 *.pth
 *.ckpt
+
+# 但是保留 img/ 文件夹里的
+!img/*.png
+!img/*.jpg
+!img/*.tif
+!img/*.tiff
+!img/*.gif
+!img/*.mp4
