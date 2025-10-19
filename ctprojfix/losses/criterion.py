@@ -96,6 +96,9 @@ class EdgeLoss(nn.Module):
 
 # ---------------- L1 in hole/valid masked regions ----------------
 class L1HoleValidLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        
     def forward(self, x, y, M):
         hole = torch.mean((1 - M) * torch.abs(x - y))
         valid = torch.mean(M * torch.abs(x - y))
@@ -130,7 +133,7 @@ class CombinedLoss(nn.Module):
                  use_ssim=False,       w_ssim=0.001,
                  use_edge=False,       w_edge=0.4,
                  use_lpips=False,      w_lpips=0.8,
-                 w_l1_hole=0.1, w_l1_valid=0.01,
+                 use_l1_hole_valid=False,      w_l1_hole=0.1, w_l1_valid=0.01,
                  use_l2=True,         w_l2=1.0):
         super().__init__()
         self.device = device
@@ -141,7 +144,7 @@ class CombinedLoss(nn.Module):
         self.ssim = SSIMLoss() if use_ssim else None
         self.edge = EdgeLoss().to(device) if use_edge else None
         self.lpips = LPIPSLoss(device) if use_lpips else None
-        self.l1_hole_valid = L1HoleValidLoss()
+        self.l1_hole_valid = L1HoleValidLoss() if use_l1_hole_valid else None
         self.l2 = L2Loss() if use_l2 else None
 
         # flags & weights
@@ -151,6 +154,7 @@ class CombinedLoss(nn.Module):
         self.use_edge = use_edge
         self.use_lpips = use_lpips
         self.use_l2 = use_l2
+        self.use_l1_hole_valid = use_l1_hole_valid
 
         self.w_perc = w_perc
         self.w_style = w_style
@@ -179,7 +183,7 @@ class CombinedLoss(nn.Module):
         if self.use_edge and self.edge is not None:
             loss += self.w_edge * self.edge(x, y)
 
-        if self.l1_hole_valid is not None:
+        if self.use_l1_hole_valid and self.l1_hole_valid is not None:
             l1h, l1v = self.l1_hole_valid(x, y, M)
             loss += self.w_l1_h * l1h + self.w_l1_v * l1v
 
