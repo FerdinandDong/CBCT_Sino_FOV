@@ -146,7 +146,7 @@ def plot_series(E, outdir):
     plt.plot(epoch, train, label='train_mean loss')
     plt.plot(epoch, vloss, label='val loss')
     plt.xlabel('epoch'); plt.ylabel('loss'); plt.title('Train / Val Loss')
-    plt.ylim(0, 2.0)  # 范围
+    # plt.ylim(0, 2.0)  # 范围
     plt.legend(); plt.grid(True, alpha=0.3)
     plt.tight_layout(); plt.savefig(os.path.join(outdir, 'train_val_loss.png'), dpi=160); plt.close()
 
@@ -180,9 +180,21 @@ def plot_series(E, outdir):
         best_epochs = epoch[is_best>0]
         best_gaps = gap[is_best>0]
         plt.scatter(best_epochs, best_gaps, marker='*', s=80, label='BEST ckpt')
-    plt.xlabel('epoch'); plt.ylabel('gap'); plt.title('Generalization Gap')
-    plt.legend(); plt.grid(True, alpha=0.3)
-    plt.tight_layout(); plt.savefig(os.path.join(outdir, 'generalization_gap.png'), dpi=160); plt.close()
+    plt.xlabel('epoch')
+    plt.ylabel('gap')
+    plt.title('Generalization Gap')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # 手动计算纵轴范围
+    padding = 0.05 * (gap.max() - gap.min())  # 计算一个边距
+    ymin = gap.min() - padding
+    ymax = gap.max() + padding
+    plt.ylim(ymin, ymax)  # 设置纵轴范围
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, 'generalization_gap.png'), dpi=160)
+    plt.close()
 
     return gap
 

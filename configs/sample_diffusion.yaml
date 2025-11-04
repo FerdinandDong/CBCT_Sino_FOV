@@ -3,13 +3,12 @@ model:
   params:
     add_angle_channel: true
     base: 64
-    depth: 4                  # 编解码层数
-    emb_dim: 256              # 时间步嵌入维度（128/256/512）
-    dropout: 0.0  
+    depth: 4
+    emb_dim: 256
+    dropout: 0.0
 
 data:
-  # use_dummy: true          # 本地演示：Dummy 数据集
-  use_dummy: false       # 服务器跑：真实数据集          
+  use_dummy: false
   dummy_length: 4
   dummy_H: 256
   dummy_W: 384
@@ -21,18 +20,30 @@ data:
   ids: [0]
   step: 1
   downsample: 2
-
   truncate_left: 350
   truncate_right: 350
   mask_mode: fixed
   normalize: percentile
+  return_norm_stats: true   # 用于生成 RAW 体
 
 sample:
   device: cuda
-  ckpt: checkpoints/diffusion/DDPM_epoch150.pth   # 权重
+  ckpt: checkpoints/diffusion/DDPM_epoch150.pth
+
+  # 采样与 DC
   T: 200
   beta_start: 1.0e-4
   beta_end: 2.0e-2
   dc_mode: "hard"
   dc_alpha: 0.5
-  out_dir: outputs/sample
+
+  # 输出目录与 pconv 的 eval 目录区分
+  out_dir: outputs/diffusion
+
+  # 体数据导出
+  save_volume: true
+  save_format: both          # npy | tiff | both
+  save_gt_noisy: true
+
+  # 仅保存中间层 or id
+  show_idx: mid

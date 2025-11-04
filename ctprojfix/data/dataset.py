@@ -476,9 +476,10 @@ def make_dataloader(cfg):
 
     split_cfg = cfg.get('split', None)
     if not split_cfg:
-        # 没有 split：返回单 Loader（兼容旧训练脚本）
-        dl_kwargs = dict(batch_size=bs, shuffle=True, num_workers=nw,
-                         pin_memory=pin, drop_last=False)
+        # 没有 split：返回单 Loader
+        shuffle_flag = bool(cfg.get("shuffle", False))
+        dl_kwargs = dict(batch_size=bs, shuffle=shuffle_flag, num_workers=nw,
+                        pin_memory=pin, drop_last=False)
         if nw > 0:
             dl_kwargs.update({"persistent_workers": persistent_workers,
                               "prefetch_factor": max(2, prefetch_factor)})

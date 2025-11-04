@@ -16,13 +16,14 @@ data:
   dummy_W: 384
   batch_size: 8
   add_angle_channel: true
-
+  shuffle: false      # 评估时关掉随机打乱
+  
   # 真实数据
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
   ids: [10] #手动确认一下  在测试集
   step: 1
-  downsample: 1
+  downsample: 2
   truncate_left: 350
   truncate_right: 350
   mask_mode: fixed          # fixed / auto_nonzero
@@ -43,6 +44,13 @@ eval:
   save_volume: true      # 是否导出整卷预测
   save_format: both      # npy tiff both
   save_gt_noisy: true    # 是否同时导出 GT / Noisy 整卷
+
+  show_id: 10         # 指定体 id
+  show_angle: 90     # 指定角度帧
+  # show_idx #有 show_id+show_angle 时优先生效
+
+
+
 recon3d:
   # 从 evaluate.py 的输出目录读取
   from_dir: outputs/eval_pconv
@@ -65,8 +73,10 @@ recon3d:
   #源到探测器 (SDD)：矩阵第一行 / 第二行的平移项是 ~372000、288000；结合比例因子，
   #$大约对应 SDD  1200 mm 左右（因为 ODD = SDD - SOD  300 m
 
-  du: 1.0              # detector 像素尺寸 U 方向
-  dv: 1.0              # detector 像素尺寸 V 方向
+  du: 2.0                # 像素尺寸 × down_sample，保持物理范围不变
+  dv: 2.0
+  # du: 1.0              # detector 像素尺寸 U 方向
+  # dv: 1.0              # detector 像素尺寸 V 方向
   SOD: 600.0          # source-to-object distance
   ODD: 300.0          # object-to-detector distance
   vol_shape: [512, 512, 512]  # [Z,Y,X]
@@ -87,18 +97,38 @@ recon3d:
   flip_v: false
 
   # 三联图导出的 z 切片（noisy/pred/gt 同切片对比）
+  # slices: ["mid", 128, 384]
   slices: ["mid", 128, 384]
 
   # WCE 水模等效 
-
+  # WCE 参数是“以像素计”的需要同步：
   wce:
     enabled: true           # 打开 WCE 跑法
     method: "hsieh"         # "gaussian" 或 "hsieh"
+
     # Hsieh 参数 都有默认值
-    input_domain: "line"   # 已是线积分域line；强度intensity
+    # input_domain: "line"   # 已是线积分域line；强度intensity
     trunc_left: 350
     trunc_right: 350
     edge_band: 16
-    clip_exp: 20.0
     radius_px_cap: 4096
+
+    pixels_are_post_downsample: false   # 和 dataset.py 一致
+    downsample: 2                       # 由本模块 /2 成有效像素
+
+    # 域一致性 
+    input_domain: "line"
+    fdk_expect: "line"
+    # fdk_expect: "intensity"
+    # input_domain: "line"   # pipeline 多线积分/归一化域
+    # fdk_expect: "line"     # ASTRA/FDK 通常吃线积分
+
+    clip_exp: 20.0
+    min_valid: 1.0e-6
     save_corr: false
+
+  display:
+    mode: "window"   # window | percentile
+    wl: 0          # 窗位（HU）
+    ww: 2000          # 窗宽
+    percentile: [1, 99]  # 当 mode=percentile 时生效

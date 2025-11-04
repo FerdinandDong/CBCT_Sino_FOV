@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-
-import os, glob, csv, argparse, yaml, math, time, json
+# eval_recon3d_from_outputs.py  HU输出 
+import os, glob, csv, argparse, yaml, math, json
 import numpy as np
 import tifffile as tiff
 from PIL import Image
@@ -9,7 +9,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 
-# 
+# Core recon APIs (wrappers)
 from ctprojfix.recon import run_fdk, wce_fdk_reconstruct, wce_hsieh_fdk_reconstruct
 
 # ========== IO & CFG ==========
@@ -112,9 +112,8 @@ def dedup_by_angle(a_idx, angles, tol_rad):
             keep.append(i); last = ang
     return np.array(keep, dtype=np.int32)
 
-# ========== 指标/可视化 ==========
+# ========== 显示/指标 ==========
 def ssim2d(x, y, dr=1.0, K1=0.01, K2=0.03, sigma=1.5):
-    from scipy.ndimage import gaussian_filter
     C1, C2 = (K1*dr)**2, (K2*dr)**2
     mu1, mu2 = gaussian_filter(x, sigma), gaussian_filter(y, sigma)
     mu1s, mu2s, mu12 = mu1*mu1, mu2*mu2, mu1*mu2
@@ -157,20 +156,87 @@ def parse_slices(spec, Z):
             out.append(ii); seen.add(ii)
     return out
 
-def save_axial_triptych(vol_noisy, vol_pred, vol_gt, z_indices, out_dir, tag=""):
+# ====== HU 可视化窗口 ======
+def _get_vmin_vmax_for_hu(vol_hu: np.ndarray, display_cfg: dict):
+    mode = str((display_cfg or {}).get("mode", "percentile")).lower()
+    if mode == "window":
+        wl = float((display_cfg or {}).get("wl", 40.0))
+        ww = float((display_cfg or {}).get("ww", 400.0))
+        vmin, vmax = wl - ww/2.0, wl + ww/2.0
+        return vmin, vmax
+    # percentile
+    p = (display_cfg or {}).get("percentile", [1, 99])
+    p1, p2 = float(p[0]), float(p[1])
+    vmin = np.percentile(vol_hu, p1)
+    vmax = np.percentile(vol_hu, p2)
+    if vmax <= vmin:
+        vmin, vmax = float(vol_hu.min()), float(vol_hu.max() + 1e-6)
+    return vmin, vmax
+
+def save_axial_triptych_hu(vol_noisy_hu, vol_pred_hu, vol_gt_hu, z_indices, out_dir, tag, display_cfg):
     os.makedirs(out_dir, exist_ok=True)
     for z in z_indices:
-        n = vol_noisy[z]; p = vol_pred[z]; g = vol_gt[z]
-        vmin, vmax = np.percentile(np.concatenate([n.ravel(), p.ravel(), g.ravel()]), [1, 99])
+        n = vol_noisy_hu[z]; p = vol_pred_hu[z]; g = vol_gt_hu[z]
+        vmin, vmax = _get_vmin_vmax_for_hu(np.concatenate([n.ravel(), p.ravel(), g.ravel()]), display_cfg)
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        axes[0].imshow(n, cmap="gray", vmin=vmin, vmax=vmax); axes[0].set_title(f"Noisy  z={z} {tag}"); axes[0].axis("off")
-        axes[1].imshow(p, cmap="gray", vmin=vmin, vmax=vmax); axes[1].set_title(f"Pred   z={z} {tag}"); axes[1].axis("off")
-        axes[2].imshow(g, cmap="gray", vmin=vmin, vmax=vmax); axes[2].set_title(f"GT     z={z} {tag}"); axes[2].axis("off")
+        axes[0].imshow(n, cmap="gray", vmin=vmin, vmax=vmax); axes[0].set_title(f"Noisy (HU)  z={z} {tag}"); axes[0].axis("off")
+        axes[1].imshow(p, cmap="gray", vmin=vmin, vmax=vmax); axes[1].set_title(f"Pred  (HU)  z={z} {tag}"); axes[1].axis("off")
+        axes[2].imshow(g, cmap="gray", vmin=vmin, vmax=vmax); axes[2].set_title(f"GT    (HU)  z={z} {tag}"); axes[2].axis("off")
         plt.tight_layout()
-        fp = os.path.join(out_dir, f"axial_triptych{tag}_z{z:04d}.png")
-        plt.savefig(fp, dpi=150, bbox_inches="tight")
-        plt.close()
+        fp = os.path.join(out_dir, f"axial_triptych_hu{tag}_z{z:04d}.png")
+        plt.savefig(fp, dpi=150, bbox_inches="tight"); plt.close()
         print(f"[FIG] {fp}")
+
+# ===== 强度域->线积分域（若需）=====
+def _to_line_if_needed(stack_TVU: np.ndarray, need: bool, eps: float = 1e-6) -> np.ndarray:
+    """若 need=True，则把强度域 I 转线积分 L=-log(I)；对<=0做裁剪。"""
+    if not need:
+        return stack_TVU
+    S = np.asarray(stack_TVU, dtype=np.float32, order="C")
+    S = np.clip(S, float(eps), None)
+    L = -np.log(S)  # 修正：np.log 不支持 dtype 参数
+    return L.astype(np.float32)
+
+# ====== HU 标定与映射 ======
+def estimate_hu_calib_from_gt(vol_gt: np.ndarray) -> dict:
+    """
+    基于 GT 重建体自动估计空气/水参考：
+    - 先用百分位分割：mask = vol > P60 近似人体（去空气）
+    - air_ref = (~mask) 体素的中位数（若几乎没有空气体素，则退化为全体 P1）
+    - water_ref = mask 体素的中位数（若掩膜很小则退化为全体中位）
+    - HU = 1000 * (x - water_ref) / (water_ref - air_ref)
+    """
+    v = np.asarray(vol_gt, dtype=np.float32)
+    p60 = np.percentile(v, 60.0)
+    mask = v > p60
+    if np.count_nonzero(~mask) < max(100, int(v.size * 0.001)):  # 空气太少
+        air_ref = float(np.percentile(v, 1.0))
+    else:
+        air_ref = float(np.median(v[~mask]))
+    if np.count_nonzero(mask) < max(100, int(v.size * 0.001)):    # 组织太少
+        water_ref = float(np.median(v))
+    else:
+        water_ref = float(np.median(v[mask]))
+    # 防护：若两参考太接近，扩大分位差
+    if abs(water_ref - air_ref) < 1e-6:
+        air_ref = float(np.percentile(v, 1.0))
+        water_ref = float(np.percentile(v, 80.0))
+    scale = 1000.0 / (water_ref - air_ref + 1e-12)
+    calib = {
+        "air_ref": air_ref,
+        "water_ref": water_ref,
+        "scale": scale  # HU = scale * (x - water_ref)
+    }
+    return calib
+
+def to_hu(vol: np.ndarray, calib: dict, clamp=(-1000.0, 1000.0)) -> np.ndarray:
+    air_ref = float(calib["air_ref"])
+    water_ref = float(calib["water_ref"])
+    scale = float(calib["scale"])
+    hu = scale * (vol.astype(np.float32) - water_ref)
+    if clamp is not None:
+        hu = np.clip(hu, clamp[0], clamp[1])
+    return hu.astype(np.float32)
 
 # ========== main ==========
 def main():
@@ -185,12 +251,16 @@ def main():
     cfg = load_cfg(args.cfg)
     recon = cfg.get("recon3d", {})
 
+    # 域开关
+    need_log = bool(recon.get("input_is_intensity", False))
+    log_eps  = float(recon.get("log_eps", 1.0e-6))
+    print(f"[CFG] input_is_intensity={need_log}  log_eps={log_eps:g}")
+
     from_dir = recon.get("from_dir", os.path.join(cfg.get("eval", {}).get("out_dir", "outputs/eval")))
     save_dir = recon.get("save_dir", os.path.join(from_dir, "recon3d"))
     os.makedirs(save_dir, exist_ok=True)
     csv_path = os.path.join(from_dir, recon.get("metrics_csv", "metrics.csv"))
 
-    # —— 打印读取路径（整卷优先）——
     pred_file = args.pred or recon.get("pred_file")
     gt_file   = args.gt   or recon.get("gt_file")
     noz_file  = args.noisy or recon.get("noisy_file")
@@ -205,7 +275,6 @@ def main():
 
     use_raw = any(s and ("_raw" in os.path.basename(s)) for s in [pred_src, gt_src, noz_src])
 
-    # 兜底：逐帧（并打印）
     if pred is None or gt is None or noz is None:
         print("[WARN] 整卷体文件未完整找到，尝试逐帧堆栈兜底...")
         p2, pfiles = stack_raw_npy(from_dir, recon.get("pattern_pred_raw", "pred_raw_*.npy"))
@@ -217,11 +286,10 @@ def main():
             g2, gfiles = stack_png_01(from_dir, recon.get("pattern_gt_png", "gt_*.png"))
             n2, nfiles = stack_png_01(from_dir, recon.get("pattern_noisy_png", "noisy_*.png"))
         pred, gt, noz = p2, g2, n2
-        # 打印首尾两条，避免刷屏
         if pfiles: print(f"[PATH] pred frames: {pfiles[0]} ... {pfiles[-1]}  (total {len(pfiles)})")
         if gfiles: print(f"[PATH] gt   frames: {gfiles[0]} ... {gfiles[-1]}  (total {len(gfiles)})")
         if nfiles: print(f"[PATH] noisy frames: {nfiles[0]} ... {nfiles[-1]}  (total {len(nfiles)})")
-        assert pred is not None and gt is not None and noz is not None, "未找到任何可用投影文件。"
+        assert pred is not None and gt is not None and noz is not None, "未找到任何可用投影文件."
 
     def to_TVU(v):
         v = np.asarray(v, dtype=np.float32)
@@ -275,23 +343,49 @@ def main():
     print(f"[CFG] use_raw={use_raw}  views={N}  det(V,U)=({det_v},{det_u})  filter={filt} gpu={gpu}")
     print(f"[CFG] du={du} dv={dv} SOD={SOD} ODD={ODD} vol_shape[Z,Y,X]={vol_shape}")
 
-    # FDK 基线
+    display_cfg = recon.get("display", {}) or {}
+
+    # ======= FDK 基线（Pred / GT / Noisy）=======
     def recon_and_save(tag, P, G, N_, A_):
         if P is None or G is None or N_ is None or A_ is None or len(A_) == 0:
             print(f"[SKIP] {tag}: empty set."); return
         if sort_by_angle:
             order = np.argsort(A_); P, G, N_, A_ = P[order], G[order], N_[order], A_[order]
         print(f"[INFO] FDK_CUDA [{tag}] ... (views={len(A_)})")
-        vol_gt, t_gt = run_fdk(G, vol_shape, du, dv, det_u, det_v, A_, SOD, ODD, gpu, filt)
-        vol_pr, t_pr = run_fdk(P, vol_shape, du, dv, det_u, det_v, A_, SOD, ODD, gpu, filt)
-        vol_nz, t_nz = run_fdk(N_, vol_shape, du, dv, det_u, det_v, A_, SOD, ODD, gpu, filt)
+
+        # 若输入是强度域，这里统一转线积分域
+        P_line = _to_line_if_needed(P, need=need_log, eps=log_eps)
+        G_line = _to_line_if_needed(G, need=need_log, eps=log_eps)
+        N_line = _to_line_if_needed(N_, need=need_log, eps=log_eps)
+
+        vol_gt, t_gt = run_fdk(G_line, vol_shape, du, dv, det_u, det_v, A_, SOD, ODD, gpu, filt)
+        vol_pr, t_pr = run_fdk(P_line, vol_shape, du, dv, det_u, det_v, A_, SOD, ODD, gpu, filt)
+        vol_nz, t_nz = run_fdk(N_line, vol_shape, du, dv, det_u, det_v, A_, SOD, ODD, gpu, filt)
         print(f"[TIME][{tag}] GT={t_gt:.3f}s, PRED={t_pr:.3f}s, NOISY={t_nz:.3f}s")
+
+        # ---- HU 标定（基于 GT），三者共用同一组参数 ----
+        hu_calib = estimate_hu_calib_from_gt(vol_gt)
+        with open(os.path.join(save_dir, f"hu_calib_{tag}.json"), "w", encoding="utf-8") as f:
+            json.dump(hu_calib, f, ensure_ascii=False, indent=2)
+
+        vol_gt_hu = to_hu(vol_gt, hu_calib)
+        vol_pr_hu = to_hu(vol_pr, hu_calib)
+        vol_nz_hu = to_hu(vol_nz, hu_calib)
+
+        # 保存 HU 体数据（float32）
+        tiff.imwrite(os.path.join(save_dir, f"recon_gt_{tag}_hu.tif"),   vol_gt_hu.astype(np.float32))
+        tiff.imwrite(os.path.join(save_dir, f"recon_pred_{tag}_hu.tif"), vol_pr_hu.astype(np.float32))
+        tiff.imwrite(os.path.join(save_dir, f"recon_noisy_{tag}_hu.tif"),vol_nz_hu.astype(np.float32))
+        np.save(os.path.join(save_dir, f"recon_gt_{tag}_hu.npy"),   vol_gt_hu.astype(np.float32))
+        np.save(os.path.join(save_dir, f"recon_pred_{tag}_hu.npy"), vol_pr_hu.astype(np.float32))
+        np.save(os.path.join(save_dir, f"recon_noisy_{tag}_hu.npy"),vol_nz_hu.astype(np.float32))
+
+        # HU 三联图（按 display 配置决定窗位/百分位）
+        z_list = parse_slices(recon.get("slices", ["mid"]), vol_gt_hu.shape[0])
+        save_axial_triptych_hu(vol_nz_hu, vol_pr_hu, vol_gt_hu, z_list, save_dir, tag=f"_{tag}", display_cfg=display_cfg)
+
+        # 指标仍按[0,1]归一矩阵计算，保持与历史对比一致
         gtn = norm01(vol_gt); prn = norm01(vol_pr); nzn = norm01(vol_nz)
-        tiff.imwrite(os.path.join(save_dir, f"recon_gt_{tag}.tif"),   gtn.astype(np.float32))
-        tiff.imwrite(os.path.join(save_dir, f"recon_pred_{tag}.tif"), prn.astype(np.float32))
-        tiff.imwrite(os.path.join(save_dir, f"recon_noisy_{tag}.tif"),nzn.astype(np.float32))
-        z_list = parse_slices(recon.get("slices", ["mid"]), gtn.shape[0])
-        save_axial_triptych(nzn, prn, gtn, z_list, save_dir, tag=f"_{tag}")
         psnr_pred = vol_psnr(prn, gtn, 1.0)
         ssim_pred = float(np.mean([ssim2d(prn[i], gtn[i], dr=1.0) for i in range(prn.shape[0])]))
         psnr_nozy = vol_psnr(nzn, gtn, 1.0)
@@ -300,52 +394,93 @@ def main():
             f.write(f"[{tag}] Pred vs GT:  PSNR={psnr_pred:.3f} dB  SSIM_Axial={ssim_pred:.4f}\n")
             f.write(f"[{tag}] Noisy vs GT: PSNR={psnr_nozy:.3f} dB  SSIM_Axial={ssim_nozy:.4f}\n")
 
-    # —— WCE 统一调度（支持 gaussian/hsieh 两种）——
+    # —— WCE 统一调度（支持 gaussian/hsieh）——
     def recon_and_save_wce(tag, noisy_TVU, gt_TVU, A_):
         if noisy_TVU is None or gt_TVU is None or A_ is None or len(A_) == 0:
             print(f"[SKIP] {tag}: empty set."); return
         if sort_by_angle:
             order = np.argsort(A_); noisy_TVU, gt_TVU, A_ = noisy_TVU[order], gt_TVU[order], A_[order]
 
+        geom = {
+            "du": du, "dv": dv,
+            "det_u": det_u, "det_v": det_v,
+            "SOD": SOD, "ODD": ODD,
+            "vol_shape": vol_shape,
+            "filt": filt, "gpu": gpu,
+        }
+
         wcfg = recon.get("wce", {}) or {}
-        method = str(wcfg.get("method", "hsieh")).lower()   # 默认用 Hsieh（已知截断）
-        geom = { "du": du, "dv": dv, "SOD": SOD, "ODD": ODD, "vol_shape": vol_shape, "gpu": gpu, "filter": filt }
+        method = str(wcfg.get("method", "hsieh")).lower()
+        ds_data = int(cfg.get("data", {}).get("downsample", 1))
 
         if method == "hsieh":
-            # 把截断宽度与输入域传下去（来自 config）
-            hsieh_params = dict(
-                trunc_left = int(wcfg.get("trunc_left", recon.get("trunc_left", 0))),
-                trunc_right= int(wcfg.get("trunc_right", recon.get("trunc_right", 0))),
-                input_domain= str(wcfg.get("input_domain", "line")),
-                min_valid = float(wcfg.get("min_valid", 1e-6)),
-                clip_exp  = float(wcfg.get("clip_exp", 20.0)),
-                radius_px_cap = int(wcfg.get("radius_px_cap", 4096)),
-                edge_band = int(wcfg.get("edge_band", 16)),
-            )
-            print(f"[INFO] WCE method = Hsieh-known-trunc  params={json.dumps(hsieh_params)}")
-            input_hint = noz_src or from_dir
-            vol_wce, t_wce, sino_corr = wce_hsieh_fdk_reconstruct(noisy_TVU, A_, geom,
-                                                                hsieh_params=hsieh_params,
-                                                                input_file_hint=input_hint)
-        else:
-            print(f"[INFO] WCE method = Gaussian  params={json.dumps(wcfg)}")
-            vol_wce, t_wce, sino_corr = wce_fdk_reconstruct(noisy_TVU, A_, geom, wce_params=wcfg)
+            hsieh_params = dict(wcfg)
+            hsieh_params["trunc_left"]  = int(wcfg.get("trunc_left",  0))
+            hsieh_params["trunc_right"] = int(wcfg.get("trunc_right", 0))
+            hsieh_params["edge_band"]   = int(wcfg.get("edge_band", 16))
+            hsieh_params["radius_px_cap"] = int(wcfg.get("radius_px_cap", 4096))
+            hsieh_params["min_valid"]   = float(wcfg.get("min_valid", 1e-6))
+            hsieh_params["clip_exp"]    = float(wcfg.get("clip_exp", 20.0))
+            hsieh_params["input_domain"] = str(wcfg.get("input_domain", "intensity")).lower()
+            hsieh_params["fdk_expect"]   = str(wcfg.get("fdk_expect",   "line")).lower()
+            if not bool(wcfg.get("pixels_are_post_downsample", False)):
+                hsieh_params["pixels_are_post_downsample"] = False
+                hsieh_params["downsample"] = ds_data
+            else:
+                hsieh_params["pixels_are_post_downsample"] = True
+                hsieh_params["downsample"] = 1
 
-        vol_gt, t_gt = run_fdk(gt_TVU,    vol_shape, du, dv, det_u, det_v, A_, SOD, ODD, gpu, filt)
-        vol_nz, t_nz = run_fdk(noisy_TVU, vol_shape, du, dv, det_u, det_v, A_, SOD, ODD, gpu, filt)
+            print("[INFO] WCE method = Hsieh-known-trunc  params=" +
+                  json.dumps(hsieh_params, ensure_ascii=False))
+
+            input_hint = noz_src or from_dir
+            vol_wce, t_wce, sino_corr = wce_hsieh_fdk_reconstruct(
+                noisy_TVU, A_, geom,
+                hsieh_params=hsieh_params,
+                input_file_hint=input_hint
+            )
+
+        elif method == "gaussian":
+            wce_params = dict(wcfg)
+            print("[INFO] WCE method = Gaussian  params=" +
+                  json.dumps(wce_params, ensure_ascii=False))
+            vol_wce, t_wce, sino_corr = wce_fdk_reconstruct(
+                noisy_TVU, A_, geom, wce_params=wce_params
+            )
+        else:
+            print(f"[WARN] Unknown WCE method={method}, skip.")
+            return
+
+        # baseline 的 GT/NOISY：按 need_log 决定是否转 log
+        G_line = _to_line_if_needed(gt_TVU,    need=need_log, eps=log_eps)
+        N_line = _to_line_if_needed(noisy_TVU, need=need_log, eps=log_eps)
+        vol_gt, t_gt = run_fdk(G_line, vol_shape, du, dv, det_u, det_v, A_, SOD, ODD, gpu, filt)
+        vol_nz, t_nz = run_fdk(N_line, vol_shape, du, dv, det_u, det_v, A_, SOD, ODD, gpu, filt)
         print(f"[TIME][WCE {tag}] GT={t_gt:.3f}s, WCE={t_wce:.3f}s, NOISY={t_nz:.3f}s")
 
-        if bool(wcfg.get("save_corr", False)):
-            np.save(os.path.join(save_dir, f"wce_corr_sino_{method}_{tag}.npy"), sino_corr.astype(np.float32))
+        # HU 标定（基于 GT）
+        hu_calib = estimate_hu_calib_from_gt(vol_gt)
+        with open(os.path.join(save_dir, f"hu_calib_wce_{tag}.json"), "w", encoding="utf-8") as f:
+            json.dump(hu_calib, f, ensure_ascii=False, indent=2)
 
+        vol_gt_hu = to_hu(vol_gt, hu_calib)
+        vol_wce_hu = to_hu(vol_wce, hu_calib)
+        vol_nz_hu = to_hu(vol_nz, hu_calib)
+
+        # 保存 HU 体数据
+        tiff.imwrite(os.path.join(save_dir, f"recon_gt_wce_{method}_{tag}_hu.tif"),   vol_gt_hu.astype(np.float32))
+        tiff.imwrite(os.path.join(save_dir, f"recon_wce_{method}_{tag}_hu.tif"),      vol_wce_hu.astype(np.float32))
+        tiff.imwrite(os.path.join(save_dir, f"recon_noisy_wce_{method}_{tag}_hu.tif"),vol_nz_hu.astype(np.float32))
+        np.save(os.path.join(save_dir, f"recon_gt_wce_{method}_{tag}_hu.npy"),   vol_gt_hu.astype(np.float32))
+        np.save(os.path.join(save_dir, f"recon_wce_{method}_{tag}_hu.npy"),      vol_wce_hu.astype(np.float32))
+        np.save(os.path.join(save_dir, f"recon_noisy_wce_{method}_{tag}_hu.npy"),vol_nz_hu.astype(np.float32))
+
+        # HU 三联图
+        z_list = parse_slices(recon.get("slices", ["mid"]), vol_gt_hu.shape[0])
+        save_axial_triptych_hu(vol_nz_hu, vol_wce_hu, vol_gt_hu, z_list, save_dir, tag=f"_wce_{method}_{tag}", display_cfg=display_cfg)
+
+        # 指标仍按[0,1]归一矩阵
         gtn = norm01(vol_gt); wcn = norm01(vol_wce); nzn = norm01(vol_nz)
-        tiff.imwrite(os.path.join(save_dir, f"recon_gt_wce_{method}_{tag}.tif"),   gtn.astype(np.float32))
-        tiff.imwrite(os.path.join(save_dir, f"recon_wce_{method}_{tag}.tif"),      wcn.astype(np.float32))
-        tiff.imwrite(os.path.join(save_dir, f"recon_noisy_wce_{method}_{tag}.tif"),nzn.astype(np.float32))
-
-        z_list = parse_slices(recon.get("slices", ["mid"]), gtn.shape[0])
-        save_axial_triptych(nzn, wcn, gtn, z_list, save_dir, tag=f"_wce_{method}_{tag}")
-
         psnr_wce = vol_psnr(wcn, gtn, 1.0)
         ssim_wce = float(np.mean([ssim2d(wcn[i], gtn[i], dr=1.0) for i in range(wcn.shape[0])]))
         psnr_noz = vol_psnr(nzn, gtn, 1.0)
@@ -354,29 +489,13 @@ def main():
             f.write(f"[WCE {method} {tag}] WCE vs GT:  PSNR={psnr_wce:.3f} dB  SSIM_Axial={ssim_wce:.4f}\n")
             f.write(f"[WCE {method} {tag}] Noisy vs GT: PSNR={psnr_noz:.3f} dB  SSIM_Axial={ssim_noz:.4f}\n")
 
-
-    # —— 半圈或整圈 —— 
-    do_half = bool(recon.get("split_half", False))
-    # 读角度所需变量在上面
-    if do_half:
-        A0 = int(A_arr[0]) if len(A_arr) > 0 else 360
-        half = A0 // 2
-        idx_half1 = np.where(a_idx <  half)[0]
-        idx_half2 = np.where(a_idx >= half)[0]
-        recon_and_save("half1", pred[idx_half1], gt[idx_half1], noz[idx_half1], ang[idx_half1])
-        recon_and_save("half2", pred[idx_half2], gt[idx_half2], noz[idx_half2], ang[idx_half2])
-        with_wce = args.with_wce or bool((recon.get("wce", {}) or {}).get("enabled", False))
-        if with_wce:
-            recon_and_save_wce("half1", noz[idx_half1], gt[idx_half1], ang[idx_half1])
-            recon_and_save_wce("half2", noz[idx_half2], gt[idx_half2], ang[idx_half2])
-    else:
-        recon_and_save("all", pred, gt, noz, ang)
-        with_wce = args.with_wce or bool((recon.get("wce", {}) or {}).get("enabled", False))
-        if with_wce:
-            recon_and_save_wce("all", noz, gt, ang)
+    # ====== 仅整圈（删除半圈分支）======
+    recon_and_save("all", pred, gt, noz, ang)
+    with_wce = args.with_wce or bool((recon.get("wce", {}) or {}).get("enabled", False))
+    if with_wce:
+        recon_and_save_wce("all", noz, gt, ang)
 
     print(f"[OK] done -> {save_dir}")
-
 
 if __name__ == "__main__":
     main()

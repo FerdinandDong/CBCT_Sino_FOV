@@ -21,21 +21,61 @@ except Exception:
     models, VGG16_Weights = None, None
 
 
+# ---------------- VGG 输入预处理（ImageNet 归一化） ----------------
+class _VGGInputNorm(nn.Module):
+    """
+    将 [0,1] 单通道的 CT 灰度复制为 3 通道，并做 ImageNet 归一化：
+      x_3 = repeat(x, 3)
+      x_n = (x_3 - mean) / std
+    说明：
+      - 这里假设输入 x ∈ [0,1]（模型的输出/GT 已是归一化域）。
+      - 如果希望先放大到 [0,255]，再减均值/除方差，其实等价于直接用标准 ImageNet mean/std（因为官方推荐 ToTensor 后就是 [0,1] 再 normalize）。
+    """
+    def __init__(self, apply=True):
+        super().__init__()
+        self.apply_norm = bool(apply)
+        # ImageNet mean/std（针对于 [0,1] 范围）
+        mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1)
+        std  = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1)
+        self.register_buffer("mean", mean, persistent=False)
+        self.register_buffer("std",  std,  persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B,1,H,W) or (B,3,H,W) in [0,1]
+        if x.dim() != 4:
+            raise ValueError(f"Expect 4D tensor (B,C,H,W), got {x.shape}")
+        if x.size(1) == 1:
+            x = x.repeat(1, 3, 1, 1)
+        elif x.size(1) != 3:
+            # 非 1/3 通道，强制压成 3 通道（取前 1 通道复制）
+            x = x[:, :1].repeat(1, 3, 1, 1)
+        if not self.apply_norm:
+            return x
+        return (x - self.mean) / self.std
+
+
 # ---------------- Perceptual (VGG16 features) ----------------
 class PerceptualLoss(nn.Module):
-    def __init__(self, device, use_pretrained=True):
+    def __init__(self, device, use_pretrained=True, imagenet_norm=True):
+        """
+        imagenet_norm: 是否在送入 VGG 前执行 ImageNet 归一化（True）
+        """
         super().__init__()
         if models is None:
             raise RuntimeError("torchvision 未安装，无法使用 PerceptualLoss/StyleLoss")
         vgg = models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1 if use_pretrained else None).features
+        # 取到 conv3_3 前后这一段（与原实现一致）
         self.slice1 = nn.Sequential(*[vgg[i] for i in range(16)]).to(device)
         self.slice1.eval()
         for p in self.slice1.parameters():
             p.requires_grad = False
 
+        self.prep = _VGGInputNorm(apply=imagenet_norm).to(device)
+
     def forward(self, x, y):
-        x = x.repeat(1, 3, 1, 1)
-        y = y.repeat(1, 3, 1, 1)
+        # 预处理：1ch->[3ch] + (x-mean)/std
+        x = self.prep(x)
+        y = self.prep(y)
         xf = self.slice1(x)
         yf = self.slice1(y)
         return F.mse_loss(xf, yf)
@@ -44,8 +84,12 @@ class PerceptualLoss(nn.Module):
 # ---------------- Style (Gram matrix on VGG features) ----------------
 class StyleLoss(nn.Module):
     def __init__(self, perceptual_loss: PerceptualLoss):
+        """
+        共享 PerceptualLoss 的 VGG 特征抽取与预处理，使两者严格一致。
+        """
         super().__init__()
-        self.vgg16_slice = perceptual_loss.slice1  # 共享 VGG 特征提取器
+        self.vgg16_slice = perceptual_loss.slice1
+        self.prep = perceptual_loss.prep  # 共享相同的 ImageNet 归一化
 
     @staticmethod
     def gram_matrix(feat: torch.Tensor):
@@ -55,10 +99,10 @@ class StyleLoss(nn.Module):
         return gram
 
     def forward(self, x, y):
-        x3 = x.repeat(1, 3, 1, 1)
-        y3 = y.repeat(1, 3, 1, 1)
-        xf = self.vgg16_slice(x3)
-        yf = self.vgg16_slice(y3)
+        x = self.prep(x)
+        y = self.prep(y)
+        xf = self.vgg16_slice(x)
+        yf = self.vgg16_slice(y)
         return F.mse_loss(self.gram_matrix(xf), self.gram_matrix(yf))
 
 
@@ -98,7 +142,7 @@ class EdgeLoss(nn.Module):
 class L1HoleValidLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        
+
     def forward(self, x, y, M):
         hole = torch.mean((1 - M) * torch.abs(x - y))
         valid = torch.mean(M * torch.abs(x - y))
@@ -114,6 +158,7 @@ class LPIPSLoss(nn.Module):
         self.lp = lpips.LPIPS(net='alex').to(device).eval()
 
     def forward(self, x, y):
+        # LPIPS 期望输入范围在 [-1,1]
         x3 = torch.clamp(x.repeat(1, 3, 1, 1), -1.0, 1.0)
         y3 = torch.clamp(y.repeat(1, 3, 1, 1), -1.0, 1.0)
         return self.lp(x3, y3).mean()
@@ -131,15 +176,21 @@ class CombinedLoss(nn.Module):
                  use_perceptual=False, w_perc=20.0,
                  use_style=False,      w_style=200.0,
                  use_ssim=False,       w_ssim=0.001,
-                 use_edge=False,       w_edge=0.4,
+                 use_edge=False,       w_edge=0.01,
                  use_lpips=False,      w_lpips=0.8,
                  use_l1_hole_valid=False,      w_l1_hole=0.1, w_l1_valid=0.01,
-                 use_l2=True,         w_l2=1.0):
+                 use_l2=True,         w_l2=1.0,
+                 # 新增：VGG 输入预处理开关
+                 imagenet_norm_for_vgg=True,
+                 use_vgg_pretrained=True):
         super().__init__()
         self.device = device
 
         # components
-        self.perc = PerceptualLoss(device) if (use_perceptual or use_style) else None
+        self.perc = PerceptualLoss(
+            device, use_pretrained=use_vgg_pretrained, imagenet_norm=imagenet_norm_for_vgg
+        ) if (use_perceptual or use_style) else None
+
         self.style = StyleLoss(self.perc) if (use_style and self.perc is not None) else None
         self.ssim = SSIMLoss() if use_ssim else None
         self.edge = EdgeLoss().to(device) if use_edge else None
