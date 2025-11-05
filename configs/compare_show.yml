@@ -1,0 +1,48 @@
+
+dpi: 220
+figsize: [14, 7]
+title_fontsize: 12
+# out_path: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/compare_show_slice128.png
+# suptitle: "PConv - Slice 128 (Reconstruction Domain)"
+out_path: outputs/pconv_ds2_L2/figs/compare_show_slice128.png
+suptitle: "PConv - Slice 128 (Reconstruction Domain)"
+
+slice_axis: 0
+slice_index: 128   # 或 "middle"/"mid"
+
+paths:
+  GT: outputs/pconv_ds2_L2/recon3d/recon_gt_all_hu.npy
+  Noisy: outputs/pconv_ds2_L2/recon3d/recon_noisy_all_hu.npy
+  WCE-Hsieh: outputs/pconv_ds2_L2/recon3d/recon_wce_hsieh_all_hu.npy
+  PConv-Pred: outputs/pconv_ds2_L2/recon3d/recon_pred_all_hu.npy
+# paths:
+#   GT: outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_gt_all_hu.npy
+#   Noisy: outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_noisy_all_hu.npy
+#   WCE-Hsieh: outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_wce_hsieh_all_hu.npy
+#   PConv-Pred: outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_pred_all_hu.npy
+
+include:
+  - Noisy
+  - WCE-Hsieh
+  - PConv-Pred
+
+# window/level 显示设置
+display:
+  mode: window        # "window" 或 "percentile"
+  wl: 0             # 仅当 mode=window 时使用
+  ww: 2000
+  # percentile: [1, 99]  # 仅当 mode=percentile 时使用
+
+heatmap:
+  enable: true
+  cmap: magma
+  colorbar: true
+  # vmax: 150.0        # 可手动指定 默认取所有差值的99分位
+
+tiles:
+  enable: true                 # 开启每个小图单独保存
+  # dir: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/tiles      # 不填则默认使用拼版图同目录 + "_tiles"
+  dir: outputs/pconv_ds2_L2/figs/tiles      # 不填则默认使用拼版图同目录 + "_tiles"
+  prefix: ""                   # 文件名前缀，可空
+  format: png                  # png/jpg 等
+  heat_with_colorbar: false    # 单个热力图是否自带 colorbar（true 会在右侧加细色条）

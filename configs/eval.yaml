@@ -36,9 +36,29 @@ data:
   return_norm_stats: true
 
 eval:
-  device: "cuda:1"     # cuda / cpu / cuda:0 / cuda:1 ...
-  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_best.pth
-  out_dir: outputs/eval_pconv
+  device: "cuda:2"     # cuda / cpu / cuda:0 / cuda:1 ...
+  # ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_best.pth
+  # out_dir: outputs/eval_pconv
+  ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_ds2_L2/pconv_unet_best.pth
+  out_dir: outputs/pconv_ds2_L2
+  # ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_ds2_L2L1/pconv_unet_best.pth
+  # out_dir: outputs/pconv_ds2_L2L1
+  # ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_ds2_L2L1_perc/pconv_unet_best.pth
+  # out_dir: outputs/pconv_ds2_L2L1_perc
+  # ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_ds2_L2L1_perc_edg/pconv_unet_best.pth
+  # out_dir: outputs/pconv_ds2_L2L1_perc_edg
+  # ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_ds2_L2L1_perc_edg_sty/pconv_unet_best.pth
+  # out_dir: outputs/pconv_ds2_L2L1_perc_edg_sty
+  # ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_ds2_L2L1_perc_edg_sty_lpips/pconv_unet_best.pth
+  # out_dir: outputs/pconv_ds2_L2L1_perc_edg_sty_lpips
+  # ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_ds2_L2L1_edg_lpips/pconv_unet_best.pth
+  # out_dir: outputs/pconv_ds2_L2L1_edg_lpips
+  # ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_ds2_L2L1_edg_sty_lpips/pconv_unet_best.pth
+  # out_dir: outputs/pconv_ds2_L2L1_edg_sty_lpips
+
+  # ckpt: /home/donghongrun/donghongrun_work/CBCT_Sino_FOV/checkpoints/pconv_unet/pconv_unet_best.pth
+  # out_dir: outputs/eval_pconv
+
   show_idx: mid
   
   save_volume: true      # 是否导出整卷预测
@@ -50,7 +70,18 @@ eval:
   # show_idx #有 show_id+show_angle 时优先生效
 
 
+  # 三联图的小图导出
+  tiles:
+    enable: true
+    dir: null                 # 默认 triptych 同目录下的 “<三联图名>_tiles/”
+    prefix: ""                # 文件名前缀
+    format: png
+    heat_with_colorbar: false # 热力图小图内置 colorbar（大图已有 colorbar）
+    cmap: magma               # 与 make_compare_figs.py 保持一致
 
+    heat_mode: adaptive      # adaptive | percentile | fixed
+    # percentile: 99.0       # heat_mode=percentile 时使用 对“这一张”的局部分位
+    # vmax: 150.0            # heat_mode=fixed 时使用
 recon3d:
   # 从 evaluate.py 的输出目录读取
   from_dir: outputs/eval_pconv
