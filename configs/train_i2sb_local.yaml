@@ -1,0 +1,74 @@
+# configs/train_i2sb_local.yaml
+model:
+  name: i2sb_local
+  params:
+    in_ch: 4         # noisy+mask+angle (3) + t_map(1) ；若不加角度通道，改 3
+    base: 64
+    depth: 4
+    dropout: 0.0
+
+data:
+  use_dummy: false
+  root_noisy: /data/shared_folder/projectionsNoisy
+  root_clean: /data/shared_folder/projectionsNoisy
+  ids: []                 # 自动发现
+  exclude_ids: [0, 10, 11]  # !!!! 与 test.txt 对齐，确保严格隔离
+
+  step: 1
+  downsample: 2
+  truncate_left: 350
+  truncate_right: 350
+  mask_mode: fixed
+  normalize: percentile
+  add_angle_channel: true
+  # add_angle_channel: False
+
+# 如果 data.add_angle_channel: true，那 inp 通道是 3（noisy+mask+angle），再加 t_map 1 → model.params.in_ch 必须是 4现在就是 4，OK
+
+# 关掉 angle 通道，要把 in_ch 改成 3
+
+  batch_size: 8           # I2SB类网络显存更大，先保守；OOM 就调更小
+  num_workers: 4
+  pin_memory: true
+
+  cache_strategy: lru
+  max_cached_ids: 2
+  persistent_workers: true
+  prefetch_factor: 2
+
+  split:
+    mode: files
+    list_format: id
+    train_list: splits/train.txt
+    val_list:   splits/val.txt
+    test_list:  splits/test.txt
+
+  val_batch_size: 8
+  test_batch_size: 8
+
+train:
+  device: "cuda:1"
+  epochs: 150
+  lr: 5e-5
+  ema: 0.999
+  sigma_T: 1.0
+  t0: 1e-4
+
+  ckpt_dir: checkpoints/i2sb_local
+  ckpt_prefix: i2sb_local
+  save_every: 1
+  max_keep: 5
+
+  log_dir: logs/i2sb_local
+
+  sched:
+    type: cosine
+    T_max: 150
+    eta_min: 1e-6
+
+  # 验证指标 & 方向（默认：loss 最小化；psnr/ssim 最大化）
+  val_metric: psnr
+  maximize_metric: true
+
+  # 每 N 个 epoch 输出一张三联图（默认 0 关闭）
+  dump_preview_every: 0

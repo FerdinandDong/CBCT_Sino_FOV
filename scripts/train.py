@@ -94,6 +94,57 @@ def main():
     cfg = load_cfg(args.cfg)
     tr = cfg.get("train", {})  # 统一取一遍 train 配置
 
+
+    # I2SB(本地) 分支：直接用我数据，无需外部库
+    name_lower = str(cfg.get("model", {}).get("name", "")).lower().strip()
+    if name_lower == "i2sb_local":
+        from ctprojfix.trainers.i2sb_local import I2SBLocalTrainer
+        from ctprojfix.models.i2sb_unet import I2SBUNet
+        device = _resolve_device(tr, args.device, args.gpu)
+        if device.type == "cuda":
+            try:
+                torch.cuda.set_device(device.index if device.index is not None else 0)
+            except Exception as e:
+                print(f"[WARN] torch.cuda.set_device 失败：{e}")
+        print(f"[DEVICE] using device = {device}")
+
+        # 数据
+        loaders = make_dataloader(cfg["data"])
+        if isinstance(loaders, dict):
+            train_loader = loaders.get("train")
+            val_loader = loaders.get("val")
+        else:
+            train_loader, val_loader = loaders, None
+
+        # 模型（通道= x0(1) + x1(2/3)）
+        mparam = cfg["model"]["params"]
+        model = I2SBUNet(
+            in_ch=int(mparam.get("in_ch", 4)),   # 默认 noisy+mask+angle + x0_embed
+            base=int(mparam.get("base", 64)),
+            depth=int(mparam.get("depth", 4)),
+            dropout=float(mparam.get("dropout", 0.0)),
+        ).to(device)
+        model = _maybe_wrap_dataparallel(model, tr)
+
+        # 训练器
+        trainer = I2SBLocalTrainer(
+            device=str(device),
+            lr=float(tr.get("lr", 5e-5)),
+            epochs=int(tr.get("epochs", 150)),
+            sigma_T=float(tr.get("sigma_T", 1.0)),     # 终端噪声尺度 (对应 I2SB 的 T)
+            t0=float(tr.get("t0", 1e-4)),              # 起始噪声
+            ema_decay=float(tr.get("ema", 0.999)),
+            ckpt_dir=tr.get("ckpt_dir", "checkpoints/diffusion/i2sb_local"),
+            ckpt_prefix=tr.get("ckpt_prefix", "i2sb_local"),
+            save_every=int(tr.get("save_every", 1)),
+            max_keep=int(tr.get("max_keep", 5)),
+            log_dir=tr.get("log_dir", "logs/i2sb_local"),
+            cond_has_angle=bool(cfg["data"].get("add_angle_channel", False)),
+        )
+
+        trainer.fit(model, train_loader, val_loader)
+        return
+
     # 解析设备
     device = _resolve_device(tr, args.device, args.gpu)
     if device.type == "cuda":

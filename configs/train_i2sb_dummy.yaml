@@ -1,0 +1,54 @@
+# ------------------------------------------------------------
+# Dummy 测试版 I2SB 训练配置
+# 目标：验证 I2SB-UNet 在 (480,620) 尺寸下能完整 forward/backward 一轮
+# ------------------------------------------------------------
+
+model:
+  name: i2sb_local
+  params:
+    in_ch: 4           # noisy + mask + angle + t_map
+    base: 64
+    depth: 4
+    emb_dim: 256
+    dropout: 0.0
+
+data:
+  use_dummy: true
+  dummy_length: 16      # 生成 16 张虚拟投影帧
+  dummy_H: 480
+  dummy_W: 620
+  truncate_left: 350
+  truncate_right: 350
+  add_angle_channel: true   # 3通道 + 1通道 t_map = 4
+  batch_size: 2
+  num_workers: 0
+  pin_memory: false
+
+train:
+  device: "cuda:2"
+  epochs: 3                # 只跑 3 epoch 做连通性验证
+  lr: 3e-4
+  ckpt_dir: checkpoints/i2sb_dummy
+  ckpt_prefix: i2sb_dummy
+  save_every: 1
+  max_keep: 2
+
+  # Scheduler
+  sched:
+    type: cosine
+    T_max: 3
+    eta_min: 1e-6
+
+  # DDPM-like 参数（I2SB trainer 内部使用）
+  T: 1000
+  beta_start: 1e-4
+  beta_end: 2e-2
+  t0: 1e-4
+  sigma_T: 1.0
+  dc_strength: 1.0
+
+  resume: false
+  strict_load: true
+  use_tqdm: true
+  log_interval: 5
+  val_metric: loss

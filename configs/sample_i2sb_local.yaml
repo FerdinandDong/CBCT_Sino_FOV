@@ -1,0 +1,53 @@
+model:
+  name: i2sb_local
+  params:
+    in_ch: 4        # noisy+mask+angle + t_map
+    base: 64
+    depth: 4
+    emb_dim: 256
+    dropout: 0.0
+
+data:
+  use_dummy: false
+  root_noisy: /data/shared_folder/projectionsNoisy
+  root_clean: /data/shared_folder/projectionsNoisy
+  ids: []
+  exclude_ids: []
+  # exclude_ids: [0, 10, 11]
+  step: 1
+  downsample: 2
+  truncate_left: 350
+  truncate_right: 350
+  mask_mode: fixed
+  normalize: percentile
+  add_angle_channel: true
+  batch_size: 1
+  num_workers: 2
+  pin_memory: true
+  cache_strategy: lru
+  max_cached_ids: 2
+  persistent_workers: true
+  prefetch_factor: 2
+  split:
+    mode: files
+    list_format: id
+    train_list: splits/train.txt
+    val_list:   splits/val.txt
+    test_list:  splits/test.txt
+  val_batch_size: 1
+  test_batch_size: 1
+  shuffle: false      # 评估时关掉随机打乱
+
+train:
+  device: "cuda:2"
+  ckpt_dir: checkpoints/i2sb_local
+  ckpt_prefix: i2sb_local
+
+sample:
+  ckpt: checkpoints/i2sb_local/i2sb_local_best.pth   # 真实权重
+  split: test
+  out_dir: outputs/i2sb_local_1step
+  save_png: true
+  save_npz: false
+  pick_id: 10
+  pick_angle: 90 #mid

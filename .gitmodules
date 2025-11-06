@@ -1,0 +1,3 @@
+[submodule "external/I2SB"]
+	path = external/I2SB
+	url = https://github.com/NVlabs/I2SB
