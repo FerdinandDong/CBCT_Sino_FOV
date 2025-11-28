@@ -131,8 +131,8 @@ def main():
             device=str(device),
             lr=float(tr.get("lr", 5e-5)),
             epochs=int(tr.get("epochs", 150)),
-            sigma_T=float(tr.get("sigma_T", 1.0)),     # 终端噪声尺度 (对应 I2SB 的 T)
-            t0=float(tr.get("t0", 1e-4)),              # 起始噪声
+            sigma_T=float(tr.get("sigma_T", 1.0)),
+            t0=float(tr.get("t0", 1e-4)),
             ema_decay=float(tr.get("ema", 0.999)),
             ckpt_dir=tr.get("ckpt_dir", "checkpoints/diffusion/i2sb_local"),
             ckpt_prefix=tr.get("ckpt_prefix", "i2sb_local"),
@@ -140,6 +140,12 @@ def main():
             max_keep=int(tr.get("max_keep", 5)),
             log_dir=tr.get("log_dir", "logs/i2sb_local"),
             cond_has_angle=bool(cfg["data"].get("add_angle_channel", False)),
+
+            # 把调度与度量策略透传进去
+            val_metric=str(tr.get("val_metric", "loss")),
+            maximize_metric=bool(tr.get("maximize_metric", False)),
+            sched=tr.get("sched", None),
+            dump_preview_every=int(tr.get("dump_preview_every", 0)),
         )
 
         trainer.fit(model, train_loader, val_loader)

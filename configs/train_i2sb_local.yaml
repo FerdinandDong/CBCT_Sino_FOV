@@ -49,7 +49,7 @@ data:
 train:
   device: "cuda:1"
   epochs: 150
-  lr: 5e-5
+  lr: 3e-4
   ema: 0.999
   sigma_T: 1.0
   t0: 1e-4
@@ -67,8 +67,10 @@ train:
     eta_min: 1e-6
 
   # 验证指标 & 方向（默认：loss 最小化；psnr/ssim 最大化）
-  val_metric: psnr
-  maximize_metric: true
+  log_interval: 100 
+  val_metric: loss 
+  maximize_metric: false 
 
   # 每 N 个 epoch 输出一张三联图（默认 0 关闭）
+  # 每 N 个 epoch 在 ckpt_dir 里输出一张三联图预览
   dump_preview_every: 0
