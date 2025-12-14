@@ -84,8 +84,10 @@ eval:
     # vmax: 150.0            # heat_mode=fixed 时使用
 recon3d:
   # 从 evaluate.py 的输出目录读取
-  from_dir: outputs/eval_pconv
-  save_dir: outputs/eval_pconv/recon3d
+  # from_dir: outputs/eval_pconv
+  # save_dir: outputs/eval_pconv/recon3d
+  from_dir: outputs/i2sb_local_1step
+  save_dir: outputs/i2sb_local_1step/recon3d
   metrics_csv: metrics.csv
 
   # 若 CSV 里没有 A 列，用这个默认总帧数（否则忽略）

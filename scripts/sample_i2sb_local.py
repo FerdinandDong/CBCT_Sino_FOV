@@ -77,6 +77,55 @@ def _save_triptych_and_heat(noisy: np.ndarray,
     else:
         print(f"[FIG] saved: {tpath}")
 
+# ---- 下面是新增的指标 & 辅助工具 ----
+def _psnr01(x: np.ndarray, y: np.ndarray, eps: float = 1e-12) -> float:
+    """在[0,1]归一域上算 PSNR."""
+    x = np.clip(x, 0.0, 1.0).astype(np.float32)
+    y = np.clip(y, 0.0, 1.0).astype(np.float32)
+    mse = float(np.mean((x - y) ** 2))
+    if mse < eps:
+        return 99.0
+    return 20.0 * float(np.log10(1.0 / np.sqrt(mse)))
+
+def _ssim2d(x: np.ndarray, y: np.ndarray, dr: float = 1.0,
+            K1: float = 0.01, K2: float = 0.03, sigma: float = 1.5) -> float:
+    """简单 SSIM（和 eval 里的实现同风格）."""
+    from scipy.ndimage import gaussian_filter
+    x = np.clip(x, 0, dr).astype(np.float32)
+    y = np.clip(y, 0, dr).astype(np.float32)
+    C1, C2 = (K1*dr)**2, (K2*dr)**2
+    mu1, mu2 = gaussian_filter(x, sigma), gaussian_filter(y, sigma)
+    mu1s, mu2s, mu12 = mu1*mu1, mu2*mu2, mu1*mu2
+    s1 = gaussian_filter(x*x, sigma) - mu1s
+    s2 = gaussian_filter(y*y, sigma) - mu2s
+    s12 = gaussian_filter(x*y, sigma) - mu12
+    num = (2*mu12 + C1) * (2*s12 + C2)
+    den = (mu1s + mu2s + C1) * (s1 + s2 + C2) + 1e-12
+    return float(np.mean(num / den))
+
+def _get_scalar_from_batch(batch: Dict[str, Any], key: str, idx: int, default=None):
+    if key not in batch:
+        return default
+    v = batch[key]
+    if isinstance(v, torch.Tensor):
+        if v.ndim == 0:
+            return v.item()
+        if v.ndim >= 1 and v.shape[0] > idx:
+            return v[idx].item()
+        return default
+    if isinstance(v, (list, tuple)):
+        try:
+            return v[idx]
+        except Exception:
+            return v[0] if len(v) > 0 else default
+    if isinstance(v, np.ndarray):
+        if v.ndim == 0:
+            return float(v)
+        if v.ndim >= 1 and v.shape[0] > idx:
+            return v[idx]
+        return default
+    return v
+
 @torch.no_grad()
 def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
     cfg = load_cfg(cfg_path)
@@ -151,36 +200,57 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
 
     depth_down = len(getattr(net, "downs", []))
 
-    # ---------- pick_id 模式：导出整卷 + 单张三联图 ----------
+    # ---------- pick_id 模式：导出整卷 + 单张三联图 + metrics ----------
     if pick_id is not None:
         pick_id = int(pick_id)
         print(f"[I2SB local] single-id volume mode: pick_id={pick_id}, pick_angle={pick_angle}")
 
         preds, gts, noisies = [], [], []
-        angle_rows: List[Tuple[int,int]] = []  # (angle, A)
+        preds_raw, gts_raw, noisies_raw = [], [], []
+        id_rows:     List[Any]      = []
+        angle_rows:  List[int]      = []
+        A_rows:      List[int]      = []
+        noisy_lo_rows: List[Optional[float]] = []
+        noisy_hi_rows: List[Optional[float]] = []
+        gt_lo_rows:    List[Optional[float]] = []
+        gt_hi_rows:    List[Optional[float]] = []
+        psnr_rows:   List[Optional[float]] = []
+        ssim_rows:   List[Optional[float]] = []
+
         best_one = None  # (diff, rec_dict)
 
         for batch in loader:
             # 解析 id 和 angle/A
             bid = batch.get("id", None)
-            if bid is None: continue
-            if torch.is_tensor(bid): ids = bid.detach().cpu().numpy().tolist()
-            elif isinstance(bid, (list, tuple, np.ndarray)): ids = list(bid)
-            else: ids = [bid]
+            if bid is None:
+                continue
+            if torch.is_tensor(bid):
+                ids = bid.detach().cpu().numpy().tolist()
+            elif isinstance(bid, (list, tuple, np.ndarray)):
+                ids = list(bid)
+            else:
+                ids = [bid]
 
             angles = batch.get("angle", None)
-            if torch.is_tensor(angles): angles_np = angles.detach().cpu().numpy().tolist()
-            elif isinstance(angles, (list, tuple, np.ndarray)): angles_np = list(angles)
-            else: angles_np = [None] * len(ids)
+            if torch.is_tensor(angles):
+                angles_np = angles.detach().cpu().numpy().tolist()
+            elif isinstance(angles, (list, tuple, np.ndarray)):
+                angles_np = list(angles)
+            else:
+                angles_np = [None] * len(ids)
 
             A_arr = batch.get("A", None)
-            if torch.is_tensor(A_arr): A_np = A_arr.detach().cpu().numpy().tolist()
-            elif isinstance(A_arr, (list, tuple, np.ndarray)): A_np = list(A_arr)
-            else: A_np = [360] * len(ids)
+            if torch.is_tensor(A_arr):
+                A_np = A_arr.detach().cpu().numpy().tolist()
+            elif isinstance(A_arr, (list, tuple, np.ndarray)):
+                A_np = list(A_arr)
+            else:
+                A_np = [360] * len(ids)
 
             # 找到本 batch 中所有属于 pick_id 的索引
             hit = [i for i, v in enumerate(ids) if int(v) == pick_id]
-            if not hit: continue
+            if not hit:
+                continue
 
             # 前向
             x1_full = batch["inp"].to(dev).float() * 2.0 - 1.0  # (B, Cx1, H, W)
@@ -191,7 +261,6 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
             has_gt = ("gt" in batch)
             gt_np = batch["gt"].cpu().numpy() if has_gt else None
 
-            # 收集该 id 的所有帧（整卷）
             for i in hit:
                 pred_i = np.squeeze(x0[i,0]).astype(np.float32)
                 noz_i  = np.squeeze(noisy[i,0]).astype(np.float32)
@@ -199,19 +268,52 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
 
                 preds.append(pred_i)
                 noisies.append(noz_i)
-                if has_gt: gts.append(gt_i)
+                if has_gt:
+                    gts.append(gt_i)
 
+                # meta
                 ai = angles_np[i] if angles_np[i] is not None else -1
-                Ai = A_np[i] if A_np[i] is not None else 360
-                try:
-                    ai = int(ai)
-                except Exception:
-                    ai = -1
-                try:
-                    Ai = int(Ai)
-                except Exception:
-                    Ai = 360
-                angle_rows.append((ai, Ai))
+                Ai = A_np[i]      if A_np[i]      is not None else 360
+                try: ai = int(ai)
+                except Exception: ai = -1
+                try: Ai = int(Ai)
+                except Exception: Ai = 360
+                angle_rows.append(ai)
+                A_rows.append(Ai)
+                id_rows.append(int(pick_id))
+
+                # scalar ranges
+                noisy_lo = _get_scalar_from_batch(batch, "noisy_lo", i, default=None)
+                noisy_hi = _get_scalar_from_batch(batch, "noisy_hi", i, default=None)
+                gt_lo    = _get_scalar_from_batch(batch, "gt_lo",    i, default=None)
+                gt_hi    = _get_scalar_from_batch(batch, "gt_hi",    i, default=None)
+                noisy_lo_rows.append(noisy_lo)
+                noisy_hi_rows.append(noisy_hi)
+                gt_lo_rows.append(gt_lo)
+                gt_hi_rows.append(gt_hi)
+
+                # raw 重建
+                if (gt_lo is not None) and (gt_hi is not None):
+                    pr_raw = pred_i * (float(gt_hi) - float(gt_lo)) + float(gt_lo)
+                    g_raw  = (gt_i * (float(gt_hi) - float(gt_lo)) + float(gt_lo)) if gt_i is not None else None
+                else:
+                    pr_raw, g_raw = None, None
+                if (noisy_lo is not None) and (noisy_hi is not None):
+                    n_raw = noz_i * (float(noisy_hi) - float(noisy_lo)) + float(noisy_lo)
+                else:
+                    n_raw = None
+                preds_raw.append(pr_raw)
+                gts_raw.append(g_raw)
+                noisies_raw.append(n_raw)
+
+                # 指标（归一化域上）
+                if has_gt and gt_i is not None:
+                    ps = _psnr01(pred_i, gt_i)
+                    ss = _ssim2d(pred_i, gt_i, dr=1.0)
+                else:
+                    ps, ss = None, None
+                psnr_rows.append(ps)
+                ssim_rows.append(ss)
 
                 # 供三联图挑选最接近 pick_angle 的帧
                 if pick_angle is not None:
@@ -230,33 +332,81 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
 
         # 角度排序（按 angle 升序，未知角度置后）
         order = list(range(len(preds)))
-        order.sort(key=lambda k: (angle_rows[k][0] < 0, angle_rows[k][0]))
-        preds   = [preds[k]   for k in order]
-        noisies = [noisies[k] for k in order]
+        order.sort(key=lambda k: (angle_rows[k] < 0, angle_rows[k]))
+        preds        = [preds[k]        for k in order]
+        noisies      = [noisies[k]      for k in order]
         if len(gts) > 0:
-            gts = [gts[k] for k in order]
-        angle_rows = [angle_rows[k] for k in order]
+            gts      = [gts[k]          for k in order]
+        preds_raw    = [preds_raw[k]    for k in order]
+        gts_raw      = [gts_raw[k]      for k in order]
+        noisies_raw  = [noisies_raw[k]  for k in order]
+        id_rows      = [id_rows[k]      for k in order]
+        angle_rows   = [angle_rows[k]   for k in order]
+        A_rows       = [A_rows[k]       for k in order]
+        noisy_lo_rows = [noisy_lo_rows[k] for k in order]
+        noisy_hi_rows = [noisy_hi_rows[k] for k in order]
+        gt_lo_rows    = [gt_lo_rows[k]    for k in order]
+        gt_hi_rows    = [gt_hi_rows[k]    for k in order]
+        psnr_rows     = [psnr_rows[k]     for k in order]
+        ssim_rows     = [ssim_rows[k]     for k in order]
 
-        # 导出整卷
+        # 导出整卷（归一化域）
         vol_pred = np.stack(preds,   axis=0).astype(np.float32)
         vol_nozy = np.stack(noisies, axis=0).astype(np.float32)
         tiff.imwrite(os.path.join(out_dir, "pred_volume.tiff"),  vol_pred, imagej=True)
         tiff.imwrite(os.path.join(out_dir, "noisy_volume.tiff"), vol_nozy, imagej=True)
+        np.save(os.path.join(out_dir, "pred_volume.npy"),  vol_pred)
+        np.save(os.path.join(out_dir, "noisy_volume.npy"), vol_nozy)
         if len(gts) > 0:
             vol_gt = np.stack(gts, axis=0).astype(np.float32)
             tiff.imwrite(os.path.join(out_dir, "gt_volume.tiff"), vol_gt, imagej=True)
+            np.save(os.path.join(out_dir, "gt_volume.npy"), vol_gt)
         else:
             vol_gt = None
         print(f"[I2SB local][OK] saved volumes -> {out_dir}")
 
-        # 写出 metrics.csv（angle 与 A）
+        # RAW 体（若上下界都存在）
+        if all(v is not None for v in preds_raw):
+            vol_pr = np.stack(preds_raw, axis=0).astype(np.float32)
+            tiff.imwrite(os.path.join(out_dir, "pred_volume_raw.tiff"), vol_pr, imagej=True)
+            np.save(os.path.join(out_dir, "pred_volume_raw.npy"), vol_pr)
+        if vol_gt is not None and all(v is not None for v in gts_raw):
+            vol_gr = np.stack(gts_raw, axis=0).astype(np.float32)
+            tiff.imwrite(os.path.join(out_dir, "gt_volume_raw.tiff"), vol_gr, imagej=True)
+            np.save(os.path.join(out_dir, "gt_volume_raw.npy"), vol_gr)
+        if all(v is not None for v in noisies_raw):
+            vol_nr = np.stack(noisies_raw, axis=0).astype(np.float32)
+            tiff.imwrite(os.path.join(out_dir, "noisy_volume_raw.tiff"), vol_nr, imagej=True)
+            np.save(os.path.join(out_dir, "noisy_volume_raw.npy"), vol_nr)
+
+        # 写出 metrics.csv（和 pconv 一样的列）
         csv_path = os.path.join(out_dir, "metrics.csv")
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["angle", "A"])
-            for ai, Ai in angle_rows:
-                w.writerow([ai, Ai])
-        print(f"[I2SB local][OK] saved angles -> {csv_path}")
+            w.writerow(["idx","id","angle","A",
+                        "noisy_lo","noisy_hi","gt_lo","gt_hi",
+                        "PSNR","SSIM"])
+            for idx, (sid, ang, A_val,
+                      nlo, nhi, glo, ghi,
+                      ps, ss) in enumerate(zip(
+                          id_rows, angle_rows, A_rows,
+                          noisy_lo_rows, noisy_hi_rows,
+                          gt_lo_rows, gt_hi_rows,
+                          psnr_rows, ssim_rows
+                      )):
+                w.writerow([
+                    idx,
+                    sid,
+                    ang,
+                    A_val,
+                    (float(nlo) if nlo is not None else ""),
+                    (float(nhi) if nhi is not None else ""),
+                    (float(glo) if glo is not None else ""),
+                    (float(ghi) if ghi is not None else ""),
+                    (float(ps)  if ps  is not None else ""),
+                    (float(ss)  if ss  is not None else ""),
+                ])
+        print(f"[I2SB local][OK] saved metrics -> {csv_path}")
 
         # 选一张保存三联图 + 热力图
         if pick_angle is not None:
@@ -266,10 +416,9 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
                     pred=preds[mid_idx],
                     noisy=noisies[mid_idx],
                     gt=(gts[mid_idx] if len(gts) > 0 else None),
-                    angle=angle_rows[mid_idx][0]
+                    angle=angle_rows[mid_idx]
                 )
             else:
-                # best_one 在采样循环内已记录（按角度最近）
                 if best_one is None:
                     # 如果全部角度未知，退化为中位
                     mid_idx = len(preds) // 2
@@ -277,7 +426,7 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
                         pred=preds[mid_idx],
                         noisy=noisies[mid_idx],
                         gt=(gts[mid_idx] if len(gts) > 0 else None),
-                        angle=angle_rows[mid_idx][0]
+                        angle=angle_rows[mid_idx]
                     )
                 else:
                     rec = best_one[1]
