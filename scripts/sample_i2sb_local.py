@@ -38,46 +38,115 @@ def _match_to_pred_size(pred_hw: Tuple[int,int],
     ph, pw = int(pred_hw[0]), int(pred_hw[1])
     return _center_crop_to(noisy, ph, pw), _center_crop_to(gt, ph, pw)
 
-def _save_triptych_and_heat(noisy: np.ndarray,
-                            pred: np.ndarray,
-                            gt: Optional[np.ndarray],
-                            save_dir: str,
-                            prefix: str) -> None:
+def _ensure_dir(p: str):
+    if p and not os.path.exists(p):
+        os.makedirs(p, exist_ok=True)
+
+def _save_tile_gray01(img01: np.ndarray, out_path: str):
+    _ensure_dir(os.path.dirname(out_path))
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig = plt.figure(figsize=(4, 4), dpi=200)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.imshow(img01, cmap="gray", vmin=0.0, vmax=1.0)
+    ax.axis("off")
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+
+def _save_tile_heat(err: np.ndarray, out_path: str, cmap: str, with_cb: bool):
+    _ensure_dir(os.path.dirname(out_path))
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    if with_cb:
+        fig = plt.figure(figsize=(4.4, 4), dpi=200)
+        ax = fig.add_axes([0.0, 0.0, 0.9, 1.0])
+        im = ax.imshow(err, cmap=cmap, vmin=0.0, vmax=None)
+        ax.axis("off")
+        cax = fig.add_axes([0.91, 0.1, 0.03, 0.8])
+        plt.colorbar(im, cax=cax)
+        fig.savefig(out_path, bbox_inches="tight", pad_inches=0)
+        plt.close(fig)
+    else:
+        fig = plt.figure(figsize=(4, 4), dpi=200)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.imshow(err, cmap=cmap, vmin=0.0, vmax=None)
+        ax.axis("off")
+        fig.savefig(out_path, bbox_inches="tight", pad_inches=0)
+        plt.close(fig)
+
+def save_quad_and_tiles(noisy01: np.ndarray,
+                        pred01: np.ndarray,
+                        gt01: Optional[np.ndarray],
+                        out_dir: str,
+                        name: str,
+                        tiles_cfg: dict):
+    """
+    输出：
+    - out_dir/figs/{name}.png : 1x4 四连图（Noisy/Pred/GT/AbsDiff+colorbar）
+    - 可选 out_dir/figs/{name}_tiles/* : Noisy/Pred/GT/AbsDiff 小图
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    n = _percentile_norm01(noisy)
-    p = _percentile_norm01(pred)
-    g = _percentile_norm01(gt) if gt is not None else n
+    _ensure_dir(out_dir)
+    fig_dir = os.path.join(out_dir, "figs")
+    _ensure_dir(fig_dir)
 
-    os.makedirs(save_dir, exist_ok=True)
-    # 三联图
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    axes[0].imshow(n, cmap="gray"); axes[0].set_title("Noisy"); axes[0].axis("off")
-    axes[1].imshow(p, cmap="gray"); axes[1].set_title("Pred");  axes[1].axis("off")
-    axes[2].imshow(g, cmap="gray"); axes[2].set_title("GT");    axes[2].axis("off")
-    plt.tight_layout()
-    tpath = os.path.join(save_dir, f"{prefix}.png")
-    plt.savefig(tpath, dpi=150, bbox_inches="tight")
-    plt.close()
+    n = np.clip(noisy01.astype(np.float32), 0, 1)
+    p = np.clip(pred01.astype(np.float32),  0, 1)
+    g = np.clip(gt01.astype(np.float32),    0, 1) if gt01 is not None else None
 
-    # 误差热力
-    if gt is not None:
+    # ---- 四连图 ----
+    if g is not None:
         err = np.abs(p - g)
-        fig = plt.figure(figsize=(5, 4))
-        import matplotlib.pyplot as plt
-        plt.imshow(err, cmap="magma")
-        plt.colorbar(fraction=0.046, pad=0.04)
-        plt.axis("off")
-        hpath = os.path.join(save_dir, f"{prefix.replace('triptych', 'heat')}.png")
-        plt.savefig(hpath, dpi=150, bbox_inches="tight")
-        plt.close()
-        print(f"[FIG] saved: {tpath}, {hpath}")
+        fig, axes = plt.subplots(1, 4, figsize=(14, 4))
+        axes[0].imshow(n, cmap="gray", vmin=0, vmax=1); axes[0].set_title("Noisy"); axes[0].axis("off")
+        axes[1].imshow(p, cmap="gray", vmin=0, vmax=1); axes[1].set_title("Pred");  axes[1].axis("off")
+        axes[2].imshow(g, cmap="gray", vmin=0, vmax=1); axes[2].set_title("GT");    axes[2].axis("off")
+        im = axes[3].imshow(err, cmap=str(tiles_cfg.get("cmap","magma")), vmin=0.0, vmax=None)
+        axes[3].set_title("|Pred-GT|"); axes[3].axis("off")
+        fig.colorbar(im, ax=axes[3], fraction=0.046, pad=0.04)
+        plt.tight_layout()
+        out_path = os.path.join(fig_dir, f"{name}.png")
+        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[FIG] {out_path}")
     else:
-        print(f"[FIG] saved: {tpath}")
+        # 没GT就退化成三联图
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        axes[0].imshow(n, cmap="gray", vmin=0, vmax=1); axes[0].set_title("Noisy"); axes[0].axis("off")
+        axes[1].imshow(p, cmap="gray", vmin=0, vmax=1); axes[1].set_title("Pred");  axes[1].axis("off")
+        plt.tight_layout()
+        out_path = os.path.join(fig_dir, f"{name}.png")
+        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[FIG] {out_path}")
+        return
 
-# ---- 下面是新增的指标 & 辅助工具 ----
+    # ---- tiles（可选）----
+    if not bool((tiles_cfg or {}).get("enable", False)):
+        return
+    tiles_dir = tiles_cfg.get("dir", None)
+    if not tiles_dir:
+        tiles_dir = os.path.join(fig_dir, f"{name}_tiles")
+    _ensure_dir(tiles_dir)
+
+    prefix = str(tiles_cfg.get("prefix", ""))
+    fmt = str(tiles_cfg.get("format", "png"))
+    cmap = str(tiles_cfg.get("cmap", "magma"))
+    with_cb = bool(tiles_cfg.get("heat_with_colorbar", False))
+
+    _save_tile_gray01(n, os.path.join(tiles_dir, f"{prefix}Noisy.{fmt}"))
+    _save_tile_gray01(p, os.path.join(tiles_dir, f"{prefix}Pred.{fmt}"))
+    _save_tile_gray01(g, os.path.join(tiles_dir, f"{prefix}GT.{fmt}"))
+    _save_tile_heat(np.abs(p-g), os.path.join(tiles_dir, f"{prefix}AbsDiff_Pred_vs_GT.{fmt}"),
+                    cmap=cmap, with_cb=with_cb)
+    print(f"[TILE] -> {tiles_dir}")
+
+# ---- 的指标 & 辅助工具 ----
 def _psnr01(x: np.ndarray, y: np.ndarray, eps: float = 1e-12) -> float:
     """在[0,1]归一域上算 PSNR."""
     x = np.clip(x, 0.0, 1.0).astype(np.float32)
@@ -132,25 +201,28 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
     train_cfg = cfg.get("train", {})
     dev = torch.device(train_cfg.get("device","cuda") if torch.cuda.is_available() else "cpu")
 
-    # --------- dataloader（尊重 sample.split；忽略 exclude_ids）---------
+    # --------- dataloader（不要pop了 混亂了）---------
     data_cfg = dict(cfg["data"])
-    data_cfg.pop("exclude_ids", None)
-    data_cfg["shuffle"] = False
+    # 评估采样时强制不打乱再兜底一次
+    data_cfg["shuffle"] = bool(data_cfg.get("shuffle", False))
     dl = make_dataloader(data_cfg)
+
+    # 选择 split如果存在 且 sample.split 指定
+    want = str(cfg.get("sample", {}).get("split", "") or "").lower().strip()
+
     if isinstance(dl, dict):
-        want = str(cfg.get("sample", {}).get("split", "test")).lower()
-        loader = dl.get(want) or dl.get("test") or dl.get("val") or dl.get("train")
-        if loader is None:
-            raise RuntimeError("All splits empty. Check splits/*.txt and data paths.")
-        try: n = len(loader.dataset)
-        except Exception: n = 0
-        print(f"[I2SB local] using split='{want}' size={n}")
+        # split 模式：严格按 want 取；取不到就报错（不 silent fallback）
+        if not want:
+            raise RuntimeError("[I2SB local] make_dataloader returned split loaders, but sample.split not set.")
+        if want not in dl or dl[want] is None:
+            raise RuntimeError(f"[I2SB local] split '{want}' not found or empty. Available: {list(dl.keys())}")
+        loader = dl[want]
+        print(f"[I2SB local] using split='{want}' size={len(loader.dataset)}")
     else:
+        # 非 split：就是单 loader（ids:[10] 这种）
         loader = dl
-        try: n = len(loader.dataset)
-        except Exception: n = 0
-        print(f"[I2SB local] single loader size={n}")
-        if n <= 0:
+        print(f"[I2SB local] single loader size={len(loader.dataset)}")
+        if len(loader.dataset) <= 0:
             raise RuntimeError("DataLoader is empty.")
 
     # --------- model & ckpt ----------
@@ -435,10 +507,23 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
             nn, gg = _match_to_pred_size((ph, pw), rec["noisy"], rec["gt"])
             a = int(rec["angle"]) if rec["angle"] is not None else -1
             a3 = f"{max(a,0):03d}"
-            prefix = f"triptych_id{pick_id}_a{a3}"
-            _save_triptych_and_heat(nn, rec["pred"], gg, out_dir, prefix)
+
+            tiles_cfg = (cfg.get("sample", {}).get("tiles", {}) or {})
+            name = f"id{pick_id}_a{a3}"
+            save_quad_and_tiles(nn, rec["pred"], gg, out_dir, name=name, tiles_cfg=tiles_cfg)
 
         print(f"[I2SB local][OK] single-id volume ready at: {out_dir}")
+
+        # 统计整卷平均（只对 has_gt 的帧）
+        ps_valid = [v for v in psnr_rows if v is not None]
+        ss_valid = [v for v in ssim_rows if v is not None]
+        if len(ps_valid) > 0:
+            mean_psnr = float(np.mean(ps_valid))
+            mean_ssim = float(np.mean(ss_valid))
+            print(f"[RESULT][id={pick_id}] PSNR: {mean_psnr:.3f} dB  |  SSIM: {mean_ssim:.4f}  (N={len(ps_valid)})")
+        else:
+            print(f"[RESULT][id={pick_id}] no GT found; cannot compute mean metrics.")
+
         return
 
     # ---------- 否则：整卷导出（全 split） ----------

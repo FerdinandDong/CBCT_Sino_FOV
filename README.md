@@ -29,6 +29,146 @@
     ![WCE Hsieh Axial z=384](img/axial_triptych_wce_hsieh_all_z0384.png)  
 
 这些结果展示了在截断投影输入条件下，**PConv-UNet 模型**与 **传统 WCE 外推 baseline** 在 CBCT FOV 扩展任务中的对比效果。
+
+## 当前代码结构(2025-12-12)
+```
+├── CBCT_Sino_FOV
+│   ├── outputs
+│   │   ├── pconv_ds2_L2
+│   │   │   ├── recon3d
+│   │   │   ├── figs
+│   │   │   │   ├── triptych_id10_a090_tiles
+│   │   │   │   ├── tiles
+│   │   ├── pconv_ds2_L2L1_perc_edg
+│   │   │   ├── recon3d
+│   │   │   ├── figs
+│   │   ├── logplots
+│   │   │   ├── pconv_ds2_L2
+│   │   │   ├── pconv_fullpixel_150epochs_fullLoss
+│   │   │   ├── pconv_ds2_L2L1_perc_edg
+│   │   │   ├── pconv_ds2_L2L1_perc_edg_sty_lpips
+│   │   │   ├── pconv_ds2_L2L1_edg_sty_lpips
+│   │   │   ├── pconv_ds2_L2L1_perc_edg_sty
+│   │   │   ├── pconv_ds_L2L1
+│   │   │   ├── pconv_ds2_L2L1_perc
+│   │   │   ├── pconv_ds2_L2L1_edg_lpips
+│   │   ├── pconv_ds2_L2L1_perc_edg_sty_lpips
+│   │   │   ├── recon3d
+│   │   │   ├── figs
+│   │   ├── pconv_ds2_L2L1_edg_sty_lpips
+│   │   │   ├── recon3d
+│   │   │   ├── figs
+│   │   ├── pconv_ds2_L2L1_perc_edg_sty
+│   │   │   ├── recon3d
+│   │   │   ├── figs
+│   │   │   │   ├── triptych_id10_a090_tiles
+│   │   │   │   ├── tiles
+│   │   ├── pconv_ds2_L2L1
+│   │   │   ├── recon3d
+│   │   │   ├── figs
+│   │   ├── i2sb_local_1step
+│   │   │   ├── recon3d
+│   │   │   ├── figs
+│   │   │   │   ├── id10_a090_tiles
+│   │   │   │   ├── tiles
+│   │   ├── pconv_fullpixel_150e_fullLoss
+│   │   │   ├── recon3d
+│   │   │   ├── figs
+│   │   ├── pconv_ds2_L2L1_perc
+│   │   │   ├── recon3d
+│   │   │   ├── figs
+│   │   ├── diffusion
+│   │   ├── pconv_ds2_L2L1_edg_lpips
+│   │   │   ├── recon3d
+│   │   │   ├── figs
+│   ├── .git
+│   ├── configs
+│   │   ├── eval.yaml
+│   │   ├── train_diffusion.yaml
+│   │   ├── train_i2sb_local.yaml
+│   │   ├── train_i2sb_dummy.yaml
+│   │   ├── sample_i2sb_local.yaml
+│   │   ├── train_unet_pconv.yaml
+│   │   ├── train_unet.yaml
+│   │   ├── sample_diffusion.yaml
+│   ├── ctprojfix
+│   │   ├── evals
+│   │   │   ├── metrics.py
+│   │   │   ├── __pycache__
+│   │   │   ├── __init__.py
+│   │   ├── utils
+│   │   │   ├── __init__.py
+│   │   ├── trainers
+│   │   │   ├── diffusion.py
+│   │   │   ├── i2sb_local.py
+│   │   │   ├── supervised.py
+│   │   │   ├── __pycache__
+│   │   │   ├── __init__.py
+│   │   ├── losses
+│   │   │   ├── __pycache__
+│   │   │   ├── criterion.py
+│   │   │   ├── __init__.py
+│   │   ├── models
+│   │   │   ├── pconv_unet.py
+│   │   │   ├── i2sb_unet.py
+│   │   │   ├── registry.py
+│   │   │   ├── __pycache__
+│   │   │   ├── diffusion
+│   │   │   │   ├── sampler.py
+│   │   │   │   ├── ddpm.py
+│   │   │   │   ├── __pycache__
+│   │   │   │   ├── __init__.py
+│   │   │   ├── unet.py
+│   │   │   ├── __init__.py
+│   │   │   ├── unet_res.py
+│   │   ├── __pycache__
+│   │   ├── recon
+│   │   │   ├── wce_hsieh.py
+│   │   │   ├── wce_baseline.py
+│   │   │   ├── __pycache__
+│   │   │   ├── fdk_astra.py
+│   │   │   ├── __init__.py
+│   │   ├── __init__.py
+│   │   ├── data
+│   │   │   ├── dataset.py
+│   │   │   ├── __pycache__
+│   │   │   ├── __init__.py
+
+│   ├── checkpoints
+│   │   ├── pconv_ds2_L2
+│   │   ├── unet
+│   │   ├── pconv_ds2_L2L1_perc_edg
+│   │   ├── pconv_ds2_L2L1_perc_edg_sty_lpips
+│   │   ├── pconv_unet_fullpixel_150epoch
+│   │   ├── pconv_ds2_L2L1_edg_sty_lpips
+│   │   ├── pconv_unet
+│   │   ├── pconv_ds2_L2L1_perc_edg_sty
+│   │   ├── pconv_ds2_L2L1
+│   │   ├── i2sb_local
+│   │   ├── pconv_ds2_L2L1_perc
+│   │   ├── diffusion
+│   │   ├── pconv_ds2_L2L1_edg_lpips
+│   ├── ctprojfix.egg-info
+│   ├── logs
+│   │   ├── logplots
+│   │   │   ├── i2sb_local
+│   ├── setup.py
+│   ├── splits
+│   ├── data
+│   ├── ct_proj_fix.egg-info
+│   ├── scripts
+│   │   ├── train.py
+│   │   ├── check_data_units.py
+│   │   ├── sample_i2sb_local.py
+│   │   ├── eval_recon3d_from_outputs.py
+│   │   ├── sample_diffusion.py
+│   │   ├── plot_train_log.py
+│   │   ├── split_dataset.py
+│   │   ├── __pycache__
+│   │   ├── evaluate.py
+│   │   ├── tree_show.py
+│   │   ├── make_compare_figs.py
+```
 ## 当前代码结构（2025-09-25）
 
 ```

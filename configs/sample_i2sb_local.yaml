@@ -37,9 +37,11 @@ data:
   val_batch_size: 1
   test_batch_size: 1
   shuffle: false      # 评估时关掉随机打乱
+  
+  return_norm_stats: true   # 为每帧返回 lo/hi，便于outputs 导出 RAW *.npy
 
 train:
-  device: "cuda:2"
+  device: "cuda:1"
   ckpt_dir: checkpoints/i2sb_local
   ckpt_prefix: i2sb_local
 
@@ -51,3 +53,12 @@ sample:
   save_npz: false
   pick_id: 10
   pick_angle: 90 #mid
+
+  save_quad: true     # 保存四连图
+  tiles:
+    enable: true
+    dir: null                 # null=默认 out_dir/figs/<name>_tiles
+    prefix: ""
+    format: png
+    heat_with_colorbar: false
+    cmap: magma

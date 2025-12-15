@@ -21,7 +21,7 @@ data:
   # 真实数据
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
-  ids: [10] #手动确认一下  在测试集
+  ids: [10] # 手动确认一下  在测试集
   step: 1
   downsample: 2
   truncate_left: 350
