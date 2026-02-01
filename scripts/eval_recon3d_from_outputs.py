@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # eval_recon3d_from_outputs.py  HU输出 
+# CBCT_Sino_FOV/scripts/eval_recon3d_from_outputs.py
+# 训练后的recon评估
 import os, glob, csv, argparse, yaml, math, json
 import numpy as np
 import tifffile as tiff
@@ -489,7 +491,7 @@ def main():
             f.write(f"[WCE {method} {tag}] WCE vs GT:  PSNR={psnr_wce:.3f} dB  SSIM_Axial={ssim_wce:.4f}\n")
             f.write(f"[WCE {method} {tag}] Noisy vs GT: PSNR={psnr_noz:.3f} dB  SSIM_Axial={ssim_noz:.4f}\n")
 
-    # ====== 仅整圈（删除半圈分支）======
+    # 整圈
     recon_and_save("all", pred, gt, noz, ang)
     with_wce = args.with_wce or bool((recon.get("wce", {}) or {}).get("enabled", False))
     if with_wce:

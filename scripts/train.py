@@ -95,7 +95,7 @@ def main():
     tr = cfg.get("train", {})  # 统一取一遍 train 配置
 
 
-    # I2SB(本地) 分支：直接用我数据，无需外部库
+    # I2SB local 分支1：直接用我数据，无需外部库
     name_lower = str(cfg.get("model", {}).get("name", "")).lower().strip()
     if name_lower == "i2sb_local":
         from ctprojfix.trainers.i2sb_local import I2SBLocalTrainer
@@ -150,7 +150,66 @@ def main():
 
         trainer.fit(model, train_loader, val_loader)
         return
+    # 结束 I2SB local 分支
 
+    # 分支 2: Multi-step 随机t
+    elif name_lower == "i2sb_local_multi":
+            print("[INFO] 正在加载 Multi-step (随机t) 训练器...")
+            # import Trainer 
+            # I2SBLocalTrainer
+            from ctprojfix.trainers.i2sb_local_multi import I2SBLocalTrainer as I2SBMultiTrainer
+            from ctprojfix.models.i2sb_unet import I2SBUNet  
+
+            device = _resolve_device(tr, args.device, args.gpu)
+            # 设备设置代码复用 
+            if device.type == "cuda":
+                try:
+                    torch.cuda.set_device(device.index if device.index is not None else 0)
+                except Exception: pass
+            print(f"[DEVICE] using device = {device}")
+
+            # 数据 
+            loaders = make_dataloader(cfg["data"])
+            if isinstance(loaders, dict):
+                train_loader, val_loader = loaders.get("train"), loaders.get("val")
+            else:
+                train_loader, val_loader = loaders, None
+
+            # 复用 I2SBUNet
+            mparam = cfg["model"]["params"]
+            model = I2SBUNet(
+                in_ch=int(mparam.get("in_ch", 4)),
+                base=int(mparam.get("base", 64)),
+                depth=int(mparam.get("depth", 4)),
+                dropout=float(mparam.get("dropout", 0.0)),
+            ).to(device)
+            model = _maybe_wrap_dataparallel(model, tr)
+
+            # 实例化新 Trainer
+            trainer = I2SBMultiTrainer(  
+                device=str(device),
+                lr=float(tr.get("lr", 3e-4)),
+                epochs=int(tr.get("epochs", 150)),
+                sigma_T=float(tr.get("sigma_T", 1.0)),
+                t0=float(tr.get("t0", 1e-4)),
+                ema_decay=float(tr.get("ema", 0.999)),
+                
+                # 路径从 cfg 透传
+                ckpt_dir=tr.get("ckpt_dir", "checkpoints/i2sb_local_multi"),
+                ckpt_prefix=tr.get("ckpt_prefix", "i2sb_local_multi"),
+                log_dir=tr.get("log_dir", "logs/i2sb_local_multi"),
+                
+                save_every=int(tr.get("save_every", 1)),
+                max_keep=int(tr.get("max_keep", 5)),
+                cond_has_angle=bool(cfg["data"].get("add_angle_channel", False)),
+                val_metric=str(tr.get("val_metric", "loss")),
+                maximize_metric=bool(tr.get("maximize_metric", False)),
+                sched=tr.get("sched", None),
+                dump_preview_every=int(tr.get("dump_preview_every", 0)),
+            )
+
+            trainer.fit(model, train_loader, val_loader)
+            return   
     # 解析设备
     device = _resolve_device(tr, args.device, args.gpu)
     if device.type == "cuda":

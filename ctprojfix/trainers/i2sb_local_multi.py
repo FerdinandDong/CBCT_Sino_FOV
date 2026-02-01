@@ -1,5 +1,5 @@
-# ctprojfix/trainers/i2sb_local.py
-#1 step
+# ctprojfix/trainers/i2sb_local_multi.py
+# multi step I2SB trainer
 # -*- coding: utf-8 -*-
 import os, csv, math, sys
 from dataclasses import dataclass
@@ -15,18 +15,12 @@ from ctprojfix.evals.metrics import psnr as psnr_fn, ssim as ssim_fn
 
 # ---------------- AMP 兼容封装 ----------------
 def _create_grad_scaler(enabled: bool):
-    """
-    优先使用 torch>=2.0 的 torch.amp.GradScaler，旧环境回落到 torch.cuda.amp.GradScaler
-    """
     try:
-        return torch.amp.GradScaler("cuda", enabled=enabled)  # 新 API
+        return torch.amp.GradScaler("cuda", enabled=enabled)
     except Exception:
-        return torch.cuda.amp.GradScaler(enabled=enabled)     # 旧 API
+        return torch.cuda.amp.GradScaler(enabled=enabled)
 
 class _autocast_ctx:
-    """
-    优先使用 torch>=2.0 的 torch.amp.autocast，旧环境回落到 torch.cuda.amp.autocast
-    """
     def __init__(self, enabled: bool, device_type: str = "cuda"):
         self.enabled = enabled
         self.device_type = device_type
@@ -35,9 +29,9 @@ class _autocast_ctx:
     def __enter__(self):
         if self.enabled:
             try:
-                self.ctx = torch.amp.autocast(self.device_type)   # 新 API
+                self.ctx = torch.amp.autocast(self.device_type)
             except Exception:
-                self.ctx = torch.cuda.amp.autocast()              # 旧 API
+                self.ctx = torch.cuda.amp.autocast()
             return self.ctx.__enter__()
         return None
 
@@ -80,11 +74,11 @@ class EMA:
 # ---------------- 配置 ----------------
 @dataclass
 class SchedCfg:
-    type: Optional[str] = None        # 'cosine' | 'step' | None
-    T_max: int = 150                  # for cosine
-    eta_min: float = 1e-6             # for cosine
-    step_size: int = 50               # for step
-    gamma: float = 0.5                # for step
+    type: Optional[str] = None
+    T_max: int = 150
+    eta_min: float = 1e-6
+    step_size: int = 50
+    gamma: float = 0.5
 
 
 # ---------------- 工具 ----------------
@@ -102,9 +96,6 @@ def _percentile_norm01(a, p_lo=1.0, p_hi=99.0):
 
 
 def _save_triptych(noisy01, pred01, gt01, out_path, title=None):
-    """
-    保存单张三联图（Noisy/Pred/GT），输入均为 [0,1]。
-    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -127,18 +118,6 @@ def _save_triptych(noisy01, pred01, gt01, out_path, title=None):
 
 
 class I2SBLocalTrainer:
-    """
-    让 I2SB(本地) 的训练“表现”与 SupervisedTrainer 保持一致：
-      - 日志落地: logs/logplots/<ckpt_prefix>/train.csv
-      - 指标: loss/psnr/ssim（val）
-      - 最优模型: *_best.pth，最后: *_last.pth
-      - sched 字段与 SupervisedTrainer 对齐
-      - cfg 新增:
-          log_interval: int
-          val_metric: 'loss'|'psnr'|'ssim'
-          maximize_metric: bool
-          dump_preview_every: int (>0 时每 N 个 epoch 在 ckpt_dir 下输出预览三联图)
-    """
     def __init__(self,
                  device: str = "cuda",
                  lr: float = 3e-4,
@@ -152,10 +131,10 @@ class I2SBLocalTrainer:
                  max_keep: int = 5,
                  log_dir: str = "logs/i2sb_local",
                  cond_has_angle: bool = True,
-                 val_metric: str = "loss",           # 'loss' | 'psnr' | 'ssim'
+                 val_metric: str = "loss",
                  maximize_metric: Optional[bool] = None,
                  sched: Optional[Dict[str, Any]] = None,
-                 dump_preview_every: int = 0,        # >0 则每 N epoch 存单张三联图
+                 dump_preview_every: int = 0,
                  log_interval: int = 100,
                  ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -172,7 +151,6 @@ class I2SBLocalTrainer:
         self.max_keep = int(max_keep)
         os.makedirs(self.ckpt_dir, exist_ok=True)
 
-        # 日志路径对齐 SupervisedTrainer：logs/logplots/<prefix>/train.csv
         self.log_csv_dir = os.path.join("logs", "logplots", ckpt_prefix)
         os.makedirs(self.log_csv_dir, exist_ok=True)
         self.log_csv_path = os.path.join(self.log_csv_dir, "train.csv")
@@ -181,7 +159,6 @@ class I2SBLocalTrainer:
                 w = csv.writer(f)
                 w.writerow(["epoch", "step", "lr", "loss", "val_loss", "psnr", "ssim"])
 
-        # 验证指标
         self.val_metric = str(val_metric or "loss").lower()
         if maximize_metric is None:
             self.maximize_metric = (self.val_metric != "loss")
@@ -192,71 +169,78 @@ class I2SBLocalTrainer:
         self.dump_preview_every = int(dump_preview_every)
         self.log_interval = int(log_interval)
 
-        # 维护最近 N 个 checkpoint 路径
         self._recent_ckpts = []
         self.best_epoch: Optional[int] = None
-        # best_score 初始化
         self._init_best_score()
 
-    # --------- best score 初始化 ---------
     def _init_best_score(self):
         if self.maximize_metric:
-            # 指标越大越好
             self.best_score = -float("inf")
         else:
-            # 指标越小越好（loss）
             self.best_score = float("inf")
 
-    # --------- I2SB 本地最简 loss ---------
+    # --------- [修改] I2SB 训练 Loss (Multi-step Random t) ---------
     def _step_loss(self, model: nn.Module, batch) -> torch.Tensor:
-        x0 = batch["gt"].to(self.device).float()      # (B,1,H,W)  in [0,1]
-        x1 = batch["inp"].to(self.device).float()     # (B,C,H,W)  in [0,1]
-        B, _, H, W = x1.shape
+        x0 = batch["gt"].to(self.device).float()      # (B,1,H,W) Clean
+        x1 = batch["inp"].to(self.device).float()     # (B,C,H,W) Noisy Stack [img, mask, angle...]
+        B, C, H, W = x1.shape
 
-        # to [-1,1]
+        # 归一化到 [-1, 1]
         x0 = x0 * 2.0 - 1.0
         x1 = x1 * 2.0 - 1.0
 
-        # 对齐到 2^(depth-1)
+        # --- 1. Pad ---
         n_down = len(getattr(model, "downs", []))
         factor = 2 ** max(n_down, 0)
         Ht = ((H + factor - 1) // factor) * factor
         Wt = ((W + factor - 1) // factor) * factor
 
-        # 右/下反射 pad
         if (Ht, Wt) != (H, W):
             pad = (0, Wt - W, 0, Ht - H)
             x0 = F.pad(x0, pad, mode="reflect")
             x1 = F.pad(x1, pad, mode="reflect")
 
-        # t-map: 1-step 近似用 1.0
-        t_map = torch.ones((B, 1, Ht, Wt), device=self.device, dtype=torch.float32)
-        net_in = torch.cat([x1, t_map], dim=1)
+        # --- 2. 准备 I2SB 条件 ---
+        # 拆分: x1_img 是要加噪的图像, conditions (mask/angle) 保持不变
+        x1_img = x1[:, 0:1, ...] 
+        conditions = x1[:, 1:, ...]
 
+        # --- 3. 随机采样 t ~ [t0, 1] ---
+        # shape: (B, 1, 1, 1) 方便广播
+        t = torch.rand(B, 1, 1, 1, device=self.device) * (1 - self.t0) + self.t0
+        
+        # --- 4. 构建 xt (Forward Process) ---
+        # I2SB: xt = (1-t)x0 + t*x1 + noise
+        noise = torch.randn_like(x0)
+        # std = sqrt(t(1-t))，这是 I2SB 常用的一种 bridge 设定
+        std = torch.sqrt(t * (1 - t))
+        xt = (1 - t) * x0 + t * x1_img + std * noise
+
+        # --- 5. 构造网络输入 ---
+        # t_map 扩展到全图
+        t_map = t.expand(B, 1, Ht, Wt)
+        
+        # 现在的 input 是: [xt, mask, angle, t_map]
+        # 注意：我们将 xt 放回原 x1_img 的位置，这样通道数依然是 4
+        net_in = torch.cat([xt, conditions, t_map], dim=1)
+
+        # --- 6. 预测 & Loss ---
+        # 目标：预测 x0
         x0_hat = model(net_in)
 
-        # 先对齐到 (Ht, Wt)
-        if x0_hat.shape[-2:] != (Ht, Wt):
-            x0_hat = F.interpolate(x0_hat, size=(Ht, Wt), mode="bilinear", align_corners=False)
-
-        # 再裁回原始 (H, W)
+        # 裁回
         if (H, W) != (Ht, Wt):
+            # 注意: 如果只求 Loss，不一定要裁回去，只要 x0 也保留 padded 状态即可
+            # 但为了逻辑一致，我们通常只计算有效区域
             x0_hat = x0_hat[..., :H, :W]
-            x0     = x0[...,     :H, :W]   # ★ 同时把 x0 裁回原尺寸
+            x0_orig = x0[..., :H, :W] # 取未 pad 之前的 x0 值(已norm)
+        else:
+            x0_orig = x0
 
-        # 兜底：若还有一丝差异（例如奇偶/整除边界），统一裁到公共最小尺寸
-        hH, hW = x0_hat.shape[-2], x0_hat.shape[-1]
-        gH, gW = x0.shape[-2],     x0.shape[-1]
-        if (hH != gH) or (hW != gW):
-            Hm, Wm = min(hH, gH), min(hW, gW)
-            x0_hat = x0_hat[..., :Hm, :Wm]
-            x0     = x0[...,     :Hm, :Wm]
-
-        # L2
-        loss = torch.mean((x0_hat - x0) ** 2)
+        # L2 Loss
+        loss = torch.mean((x0_hat - x0_orig) ** 2)
         return loss
 
-    # --------- 日志写入，和 plot_train_log.py 对齐 ---------
     def _log_row(self, epoch, step, lr, loss, val_loss, psnr, ssim):
         with open(self.log_csv_path, "a", newline="") as f:
             w = csv.writer(f)
@@ -288,22 +272,23 @@ class I2SBLocalTrainer:
             except Exception:
                 pass
 
-    # --------- 计算验证指标（对齐 SupervisedEvaluator）---------
+    # --------- 验证 (保持 One-step t=1.0 逻辑用于快速监控) ---------
     @torch.no_grad()
     def _eval_val(self, model: nn.Module, val_loader) -> Dict[str, float]:
         if val_loader is None:
             return {"val_loss": None, "psnr": None, "ssim": None}
         model.eval()
-        # 使用 EMA 权重
         self.ema.apply_shadow(model)
         s_loss, s_psnr, s_ssim, n = 0.0, 0.0, 0.0, 0
 
         for batch in val_loader:
-            # 计算 loss
+            # Loss 依然调用 step_loss (随机 t)，但这只为了监控 loss 下降趋势
+            # 如果想看确定的 loss，可以临时 mock t=1，但这里保持原样简单
             loss = self._step_loss(model, batch).item()
             s_loss += loss
 
-            # 计算 PSNR/SSIM：需要把 net 输出和 gt 都放回 [0,1]
+            # PSNR/SSIM 计算：这里我们模拟 "One-step Inference at t=1.0"
+            # 也就是把 Noisy 直接喂进去，看模型能不能直接恢复 (One-step consistency)
             x0 = batch["gt"].to(self.device).float()       # [0,1]
             x1 = batch["inp"].to(self.device).float()      # [0,1]
             B, _, H, W = x1.shape
@@ -311,7 +296,6 @@ class I2SBLocalTrainer:
             t_map = torch.ones((B, 1, H, W), device=self.device, dtype=torch.float32)
             x1m1 = x1 * 2.0 - 1.0
 
-            # pad 到整齐
             n_down = len(getattr(model, "downs", []))
             factor = 2 ** max(n_down, 0)
             Ht = _ceil_to(H, factor)
@@ -321,6 +305,7 @@ class I2SBLocalTrainer:
                 x1m1 = F.pad(x1m1, pad, mode="reflect")
                 t_map = F.pad(t_map, pad, mode="reflect")
 
+            # 这里直接喂 x1 (相当于 t=1, xt=x1)，看 One-step 效果
             xin = torch.cat([x1m1, t_map], dim=1)
             pred = model(xin)
             if pred.shape[-2:] != (Ht, Wt):
@@ -331,20 +316,19 @@ class I2SBLocalTrainer:
             pred01 = ((pred.clamp(-1, 1) + 1.0) * 0.5).detach()
             gt01 = x0.detach()
 
-            # 逐样本 PSNR/SSIM 累加
             for i in range(pred01.shape[0]):
                 s_psnr += float(psnr_fn(pred01[i, 0].cpu().numpy(), gt01[i, 0].cpu().numpy()))
                 s_ssim += float(ssim_fn(pred01[i, 0].cpu().numpy(), gt01[i, 0].cpu().numpy()))
                 n += 1
 
         self.ema.restore(model)
-        if n == 0:  # 防止除 0
+        if n == 0:
             return {"val_loss": s_loss, "psnr": None, "ssim": None}
         return {"val_loss": s_loss / max(1, len(val_loader)),
                 "psnr": s_psnr / n,
                 "ssim": s_ssim / n}
 
-    # --------- 预览图导出（每 N epoch 一张）---------
+    # --------- 预览图导出 (同理保持 One-step) ---------
     @torch.no_grad()
     def _dump_preview(self, model: nn.Module, data_loader, epoch: int):
         if self.dump_preview_every <= 0 or data_loader is None:
@@ -361,11 +345,12 @@ class I2SBLocalTrainer:
             self.ema.restore(model)
             return
 
-        x0 = batch["gt"].to(self.device).float()   # [0,1]
-        x1 = batch["inp"].to(self.device).float()  # [0,1]
+        x0 = batch["gt"].to(self.device).float()   
+        x1 = batch["inp"].to(self.device).float()  
         B, _, H, W = x1.shape
 
         with _autocast_ctx(enabled=(self.device.type == "cuda"), device_type="cuda"):
+            # Preview 依然使用 t=1.0 展示 "单步去噪" 能力
             t_map = torch.ones((B, 1, H, W), device=self.device, dtype=torch.float32)
             x1m1 = x1 * 2.0 - 1.0
 
@@ -389,7 +374,6 @@ class I2SBLocalTrainer:
             gt01   = x0.detach().cpu()
             noisy01= x1[:, 0:1].detach().cpu() if x1.shape[1] >= 1 else gt01
 
-            # 再兜底：统一三者的公共最小尺寸
             hH, hW = pred01.shape[-2], pred01.shape[-1]
             gH, gW = gt01.shape[-2],   gt01.shape[-1]
             nH, nW = noisy01.shape[-2],noisy01.shape[-1]
@@ -403,7 +387,6 @@ class I2SBLocalTrainer:
 
         self.ema.restore(model)
 
-    # --------- 主训练循环（含 tqdm 打印）---------
     def fit(self, model: nn.Module, train_loader, val_loader=None):
         from tqdm import tqdm
 
@@ -411,7 +394,6 @@ class I2SBLocalTrainer:
         self.ema = EMA(model, decay=self.ema_decay)
         opt = optim.AdamW(model.parameters(), lr=self.lr)
 
-        # scheduler 对齐
         if self.sched_cfg.type == "cosine":
             sched = optim.lr_scheduler.CosineAnnealingLR(
                 opt, T_max=int(self.sched_cfg.T_max), eta_min=float(self.sched_cfg.eta_min)
@@ -429,11 +411,9 @@ class I2SBLocalTrainer:
         n_batches = len(train_loader)
         global_step = 0
 
-        # best 逻辑与 SupervisedTrainer 一致
         self._init_best_score()
         self.best_epoch = None
 
-        # tqdm 在nohup下自动禁用
         disable_tqdm = not sys.stdout.isatty()
 
         for epoch in range(1, self.epochs + 1):
@@ -460,35 +440,29 @@ class I2SBLocalTrainer:
                 if not disable_tqdm:
                     pbar.set_postfix(loss=f"{loss.item():.4f}", avg=f"{avg:.4f}", lr=f"{lr_now:.2e}")
 
-                # —— 每 log_interval 步打印一次（nohup 可见） ——
                 if self.log_interval > 0 and (it % self.log_interval == 0):
                     print(f"[Epoch {epoch} | Step {it}/{n_batches}] loss={loss.item():.4f} lr={lr_now:.2e}", flush=True)
 
-            # 学习率步进
             if sched is not None:
                 sched.step()
 
-            # ---- 验证与日志 ----
             val_res = self._eval_val(model, val_loader) if val_loader is not None else {"val_loss": None, "psnr": None, "ssim": None}
             val_loss, vpsnr, vssim = val_res["val_loss"], val_res["psnr"], val_res["ssim"]
 
             epoch_avg = running / max(1, n_batches)
 
-            # —— 与 pconv 相同的 epoch 汇总行 ——
             print(f"Epoch {epoch} mean loss: {epoch_avg:.4f} | lr={opt.param_groups[0]['lr']:.8e}", flush=True)
             if val_loss is not None:
                 psnr_str = f"{vpsnr:.3f} dB" if vpsnr is not None else "NA"
                 ssim_str = f"{vssim:.4f}"    if vssim is not None else "NA"
                 print(f"[VAL {epoch}] loss={val_loss:.6f}  PSNR={psnr_str}  SSIM={ssim_str}", flush=True)
 
-            # 写 CSV 日志（和 plot_train_log.py 对齐）
             self._log_row(epoch=epoch, step=global_step, lr=opt.param_groups[0]["lr"],
                           loss=epoch_avg,
                           val_loss=(val_loss if val_loss is not None else ""),
                           psnr=(vpsnr if vpsnr is not None else ""),
                           ssim=(vssim if vssim is not None else ""))
 
-            # ---- BEST 选择逻辑 ----
             score = None
             if self.val_metric == "loss" and val_loss is not None:
                 score = (-val_loss) if self.maximize_metric else val_loss
@@ -507,9 +481,7 @@ class I2SBLocalTrainer:
             if is_better:
                 self._save_ckpt(model, epoch, tag="best")
 
-            # BEST 提示（与 pconv 风格一致）
             if self.val_metric == "loss" and val_loss is not None:
-                # 展示真实 best 的“原值”（非取反后）
                 best_disp = (-self.best_score) if self.maximize_metric else self.best_score
                 be = self.best_epoch if self.best_epoch is not None else epoch
                 print(f"[BEST] metric={best_disp:.4f} @ epoch {be}", flush=True)
@@ -518,14 +490,11 @@ class I2SBLocalTrainer:
                 be = self.best_epoch if self.best_epoch is not None else epoch
                 print(f"[BEST] metric={best_disp:.4f} @ epoch {be}", flush=True)
 
-            # —— 预览图 ——（每 N epoch 导出一张三联图）
             self._dump_preview(model, val_loader if val_loader is not None else train_loader, epoch)
 
-            # 定期保存
             if (epoch % self.save_every) == 0:
                 self._save_ckpt(model, epoch)
                 self._prune_ckpt()
 
-            # 最后保存 last
             if epoch == self.epochs:
                 self._save_ckpt(model, epoch, tag="last")

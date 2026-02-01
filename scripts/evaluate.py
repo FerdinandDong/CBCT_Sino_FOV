@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # CBCT_Sino_FOV/scripts/evaluate.py
+# evaluate.py 训练中eval
 import argparse, yaml, os, csv, random
 import numpy as np
 import torch

@@ -1,0 +1,64 @@
+# configs/sample_i2sb_local_multi.yaml
+
+model:
+  name: i2sb_local_multi
+  params:
+    in_ch: 4        # noisy+mask+angle + t_map
+    base: 64
+    depth: 4
+    emb_dim: 256
+    dropout: 0.0
+
+data:
+  use_dummy: false
+  root_noisy: /data/shared_folder/projectionsNoisy
+  root_clean: /data/shared_folder/projectionsNoisy
+  ids: []
+  exclude_ids: []
+  step: 1
+  downsample: 2
+  truncate_left: 350
+  truncate_right: 350
+  mask_mode: fixed
+  normalize: percentile
+  add_angle_channel: true
+  
+  # 采样时 batch_size 保持小一点，steps 循环会增加计算耗时
+  batch_size: 1
+  num_workers: 2
+  pin_memory: true
+  
+  split:
+    mode: files
+    list_format: id
+    train_list: splits/train.txt
+    val_list:   splits/val.txt
+    test_list:  splits/test.txt
+  
+  shuffle: false
+  return_norm_stats: true
+
+train:
+  device: "cuda:1"
+  ckpt_dir: checkpoints/i2sb_local_multi
+  ckpt_prefix: i2sb_local_multi
+
+sample:
+  # 指向训练好的随机 t 模型
+  ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best.pth
+  
+  split: test
+  out_dir: outputs/i2sb_local_multi_10step  # 区分输出文件夹
+  
+  # 
+  # 比 1 step 更好的细节和一致性
+  steps: 10
+  
+  pick_id: 10
+  pick_angle: 90
+  
+  save_quad: true
+  tiles:
+    enable: true
+    format: png
+    cmap: magma

@@ -1,0 +1,64 @@
+# configs/train_i2sb_local_multi.yaml
+
+model:
+  name: i2sb_local_multi   # 于在 train.py 里触发新逻辑
+  params:
+    in_ch: 4          # 保持 4 (noisy+mask+angle + t_map)
+    base: 64
+    depth: 4
+    dropout: 0.0
+
+data:
+  # 
+  use_dummy: false
+  root_noisy: /data/shared_folder/projectionsNoisy
+  root_clean: /data/shared_folder/projectionsNoisy
+  ids: []
+  exclude_ids: [0, 10, 11]
+  step: 1
+  downsample: 2
+  truncate_left: 350
+  truncate_right: 350
+  mask_mode: fixed
+  normalize: percentile
+  add_angle_channel: true
+  
+  batch_size: 8
+  num_workers: 4
+  pin_memory: true
+  cache_strategy: lru
+  max_cached_ids: 2
+  split:
+    mode: files
+    list_format: id
+    train_list: splits/train.txt
+    val_list:   splits/val.txt
+    test_list:  splits/test.txt
+
+train:
+  device: "cuda:1"
+  epochs: 150
+  lr: 3e-4
+  ema: 0.999
+  
+  # I2SB 参数
+  sigma_T: 1.0
+  t0: 1e-4
+
+  #路径区分
+  ckpt_dir: checkpoints/i2sb_local_multi
+  ckpt_prefix: i2sb_local_multi
+  log_dir: logs/i2sb_local_multi
+  
+  save_every: 1
+  max_keep: 5
+  
+  sched:
+    type: cosine
+    T_max: 150
+    eta_min: 1e-6
+
+  log_interval: 100
+  val_metric: loss
+  maximize_metric: false
+  dump_preview_every: 0
