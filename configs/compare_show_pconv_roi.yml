@@ -1,7 +1,5 @@
 tasks:
-  # ---------------------------------------------------------
-  # 任务 1：3D 重建域切片对比 (Reconstruction Slice)
-  # ---------------------------------------------------------
+# 3D 重建域切片对比 (Reconstruction Slice)
   - name: recon_slice384
     dpi: 220
     figsize: [14, 7]
@@ -36,6 +34,10 @@ tasks:
       enable: true
       cmap: magma
       colorbar: true
+
+# 强制固定热力图范围
+      heat_mode: fixed   # 改为 fixed
+      vmax: 700.0        # xxx HU (超过变白/最亮) 其实 之前是900自适应
 
     tiles:
       enable: true
