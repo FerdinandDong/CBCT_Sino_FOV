@@ -500,7 +500,7 @@ def run_one_task(task_cfg: dict):
                         print(f"[ROI-BOXED] {fpath}")
 
 
-# ---------------------- main ----------------------
+# main
 def main(cfg_path: str):
     if yaml is None:
         raise RuntimeError("PyYAML 未安装。请先 `pip install pyyaml`")

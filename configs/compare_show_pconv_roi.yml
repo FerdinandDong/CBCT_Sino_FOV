@@ -1,0 +1,131 @@
+tasks:
+  # ---------------------------------------------------------
+  # 任务 1：3D 重建域切片对比 (Reconstruction Slice)
+  # ---------------------------------------------------------
+  - name: recon_slice384
+    dpi: 220
+    figsize: [14, 7]
+    title_fontsize: 12
+    # 输出路径
+    out_path: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/compare_recon_z384.png
+    # 标题
+    suptitle: "PConv (Perc+Edg+Sty) - Slice 384 (Reconstruction Domain)"
+    slice_axis: 0
+    slice_index: 384
+
+    paths:
+      # 数据源路径
+      GT: outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_gt_all_hu.npy
+      Noisy: outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_noisy_all_hu.npy
+      # 如果没 WCE注释
+      WCE-Hsieh: outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_wce_hsieh_all_hu.npy
+      # Key 名
+      PConv-Pred: outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_pred_all_hu.npy
+
+    # 包含列表
+    include: [Noisy, WCE-Hsieh, PConv-Pred]
+    # 如果没：
+    # include: [Noisy, PConv-Pred]
+
+    display:
+      mode: window
+      wl: 0
+      ww: 2000
+
+    heatmap:
+      enable: true
+      cmap: magma
+      colorbar: true
+
+    tiles:
+      enable: true
+      # 小图路径
+      dir: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/tiles_recon
+      format: png
+      heat_with_colorbar: false
+
+    roi:
+      enable: true
+      out_suffix: "_roi"
+      linewidth: 2
+      tiles:
+        enable: true
+        # ROI 小图路径
+        dir: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/tiles_recon_roi
+        boxed_enable: true
+        format: png
+        heat_with_colorbar: false
+      list:
+        - name: ROI-1_boundary_artifact
+          color: red
+          center_xy_frac: [0.85, 0.50]
+          size_wh_px: [128, 128]
+        - name: ROI-2_soft_tissue
+          color: lime
+          center_xy_frac: [0.50, 0.58]
+          size_wh_px: [96, 96]
+  
+  # 2D 投影域对比 (Projection View)
+
+  - name: proj_angle90
+    dpi: 220
+    figsize: [16, 6]
+    title_fontsize: 12
+    # 输出路径
+    out_path: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/compare_proj_a090.png
+    # 
+    suptitle: "PConv (Perc+Edg+Sty) - Projection View a=90"
+    slice_axis: 0
+    slice_index: 90
+
+    paths:
+      # 投影数据路径
+      GT: outputs/pconv_ds2_L2L1_perc_edg_sty/gt_volume_raw.npy
+      Noisy: outputs/pconv_ds2_L2L1_perc_edg_sty/noisy_volume_raw.npy
+      # Key 名
+      PConv-Pred: outputs/pconv_ds2_L2L1_perc_edg_sty/pred_volume_raw.npy
+
+    # 包含列表
+    include: [Noisy, PConv-Pred]
+
+    display:
+      mode: percentile
+      percentile: [1, 99]
+
+    heatmap:
+      enable: true
+      cmap: magma
+      colorbar: true
+
+    tiles:
+      enable: true
+      # [修改] 小图路径
+      dir: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/tiles_proj
+      format: png
+      heat_with_colorbar: false
+
+    roi:
+      enable: true
+      out_suffix: "_roi"
+      linewidth: 2
+      tiles:
+        enable: true
+        # [修改] ROI 小图路径
+        dir: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/tiles_proj_roi
+        boxed_enable: true
+        format: png
+        heat_with_colorbar: false
+
+      list:
+        - name: ROI-Boundary-L
+          color: red
+          center_xy_frac: [0.282, 0.50]
+          size_wh_px: [128, 128]
+        - name: ROI-Boundary-R
+          color: red
+          center_xy_frac: [0.718, 0.50]
+          size_wh_px: [128, 128]
+        - name: ROI-Interior
+          color: lime
+          center_xy_frac: [0.50, 0.60]
+          size_wh_px: [96, 96]
