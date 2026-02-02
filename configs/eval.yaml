@@ -166,3 +166,27 @@ recon3d:
     wl: 0          # 窗位（HU）
     ww: 2000          # 窗宽
     percentile: [1, 99]  # 当 mode=percentile 时生效
+
+
+  roi:
+    enable: true
+    # 使用相对坐标(0~1)，避免写死 512，论文也更优雅
+    # center_xy_frac: [x_frac, y_frac]  (注意这里是 x,y 对应列、行)
+    # size_wh_px: [w, h]
+    list:
+      - name: "ROI-1"
+        color: "red"
+        center_xy_frac: [0.85, 0.50]
+        size_wh_px: [128, 128]
+      - name: "ROI-2"
+        color: "lime"
+        center_xy_frac: [0.50, 0.58]
+        size_wh_px: [96, 96]
+
+    tiles:
+      enable: true
+      # 默认放到与 ROI 图相同目录的
+      dir: null
+      format: "png"
+      # tiles 的显示范围：跟主图一致
+      use_same_vminvmax_as_main: true

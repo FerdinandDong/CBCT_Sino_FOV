@@ -1,0 +1,131 @@
+tasks:
+  - name: recon_slice384
+    dpi: 220
+    figsize: [14, 7]
+    title_fontsize: 12
+    out_path: outputs/i2sb_local_1step/figs/compare_recon_z384.png
+    suptitle: "I2SB - Slice 384 (Reconstruction Domain)"
+    slice_axis: 0
+    slice_index: 384
+  # - name: recon_slice256
+  #   dpi: 220
+  #   figsize: [14, 7]
+  #   title_fontsize: 12
+  #   out_path: outputs/i2sb_local_1step/figs/compare_recon_z256.png
+  #   suptitle: "I2SB - Slice 256 (Reconstruction Domain)"
+  #   slice_axis: 0
+  #   slice_index: 256
+  # - name: recon_slice128
+  #   dpi: 220
+  #   figsize: [14, 7]
+  #   title_fontsize: 12
+  #   out_path: outputs/i2sb_local_1step/figs/compare_recon_z128.png
+  #   suptitle: "I2SB - Slice 128 (Reconstruction Domain)"
+  #   slice_axis: 0
+  #   slice_index: 128
+
+    paths:
+      GT: outputs/i2sb_local_1step/recon3d/recon_gt_all_hu.npy
+      Noisy: outputs/i2sb_local_1step/recon3d/recon_noisy_all_hu.npy
+      WCE-Hsieh: outputs/i2sb_local_1step/recon3d/recon_wce_hsieh_all_hu.npy
+      I2SB-Pred: outputs/i2sb_local_1step/recon3d/recon_pred_all_hu.npy
+
+    include: [Noisy, WCE-Hsieh, I2SB-Pred]
+
+    display:
+      mode: window
+      wl: 0
+      ww: 2000
+
+    heatmap:
+      enable: true
+      cmap: magma
+      colorbar: true
+
+    tiles:
+      enable: true
+      dir: outputs/i2sb_local_1step/figs/tiles_recon
+      format: png
+      heat_with_colorbar: false
+
+    roi:
+      enable: true
+      out_suffix: "_roi"
+      linewidth: 2
+      tiles:
+        enable: true
+        dir: outputs/i2sb_local_1step/figs/tiles_recon_roi
+        boxed_enable: true
+        # boxed_dir: outputs/i2sb_local_1step/figs/tiles_recon_roi_boxed
+        format: png
+        heat_with_colorbar: false
+      list:
+        - name: ROI-1_boundary_artifact
+          color: red
+          center_xy_frac: [0.85, 0.50]
+          size_wh_px: [128, 128]
+        - name: ROI-2_soft_tissue
+          color: lime
+          center_xy_frac: [0.50, 0.58]
+          size_wh_px: [96, 96]
+  
+  
+  - name: proj_angle90
+    dpi: 220
+    figsize: [16, 6]
+    title_fontsize: 12
+    out_path: outputs/i2sb_local_1step/figs/compare_proj_a090.png
+    suptitle: "I2SB - Projection View a=90 (Projection Domain)"
+    slice_axis: 0
+    slice_index: 90  # 第 90 帧
+
+    paths:
+      GT: outputs/i2sb_local_1step/gt_volume_raw.npy
+      Noisy: outputs/i2sb_local_1step/noisy_volume_raw.npy
+      I2SB-Pred: outputs/i2sb_local_1step/pred_volume_raw.npy
+
+    include: [Noisy, I2SB-Pred]
+
+    display:
+      mode: percentile
+      percentile: [1, 99]
+      # 如果0~1域：
+      # mode: fixed01
+
+    heatmap:
+      enable: true
+      cmap: magma
+      colorbar: true
+
+    tiles:
+      enable: true
+      dir: outputs/i2sb_local_1step/figs/tiles_proj
+      format: png
+      heat_with_colorbar: false
+
+    roi:
+      enable: true
+      out_suffix: "_roi"
+      linewidth: 2
+      tiles:
+        enable: true
+        dir: outputs/i2sb_local_1step/figs/tiles_proj_roi
+        boxed_enable: true
+        format: png
+        heat_with_colorbar: false
+
+      # 投影域 ROI：两个 boundary + 一个 interior
+      # 下采样后U=620，cut=175，边界在 u=175 和 u=445
+      list:
+        - name: ROI-Boundary-L
+          color: red
+          center_xy_frac: [0.282, 0.50]   # 175/620
+          size_wh_px: [128, 128]
+        - name: ROI-Boundary-R
+          color: red
+          center_xy_frac: [0.718, 0.50]   # 445/620
+          size_wh_px: [128, 128]
+        - name: ROI-Interior
+          color: lime
+          center_xy_frac: [0.50, 0.60]
+          size_wh_px: [96, 96]

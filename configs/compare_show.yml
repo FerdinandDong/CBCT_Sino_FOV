@@ -52,3 +52,25 @@ tiles:
   prefix: ""                   # 文件名前缀，可空
   format: png                  # png/jpg 等
   heat_with_colorbar: false    # 单个热力图是否自带 colorbar（true 会在右侧加细色条）
+
+roi:
+  enable: true
+  linewidth: 2
+  out_suffix: "_roi"     # 生成 compare_show_slice128_roi.png
+  tiles:
+    enable: true
+    # dir: outputs/.../figs/roi_tiles   # 不写就自动用 tiles.dir + "_roi"
+    format: png
+    heat_with_colorbar: false
+  list:
+    # ROI-1：truncation artifacts / streaking 常见区域（示例）
+    - name: "ROI-1_boundary"
+      color: "red"
+      center_xy_frac: [0.85, 0.50]
+      size_wh_px: [128, 128]
+
+    # ROI-2：soft tissue / interior（示例）
+    - name: "ROI-2_interior"
+      color: "lime"
+      center_xy_frac: [0.50, 0.58]
+      size_wh_px: [96, 96]
