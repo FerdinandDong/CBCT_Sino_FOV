@@ -202,7 +202,7 @@ def save_axial_triptych_hu(vol_noisy_hu, vol_pred_hu, vol_gt_hu, z_indices, out_
         print(f"[FIG] {fp}")
 
 
-# ===== ROI helpers (新增功能，不影响原图) =====
+# ROI helpers 
 def _clip_int(v, lo, hi):
     return int(max(lo, min(hi, v)))
 
@@ -269,7 +269,7 @@ def save_axial_triptych_hu_with_rois(vol_noisy_hu, vol_pred_hu, vol_gt_hu,
     for z in z_indices:
         n = vol_noisy_hu[z]; p = vol_pred_hu[z]; g = vol_gt_hu[z]
 
-        # 主图显示范围：与原始一致（推荐，保证横向可比）
+        # 主图显示范围：与原始一致
         if same_range:
             vmin, vmax = _get_vmin_vmax_for_hu(np.concatenate([n.ravel(), p.ravel(), g.ravel()]), display_cfg)
         else:
@@ -301,7 +301,7 @@ def save_axial_triptych_hu_with_rois(vol_noisy_hu, vol_pred_hu, vol_gt_hu,
                 ax.add_patch(rect)
 
 
-                # 标注文字（可改成 ROI-1/ROI-2 更“论文风”）
+                # 标注文字（ROI-1/ROI-2 论文）
                 name = str(item.get("name", "ROI"))
                 ax.text(x0, max(0, y0-6), name, fontsize=8,
                         bbox=dict(facecolor='black', alpha=0.3, pad=1),
