@@ -1,0 +1,75 @@
+# ================= 全局变量 =================
+# root: "outputs/i2sb_local_1step"
+# root: "outputs/pconv_ds2_L2L1_perc_edg_sty_lpips"
+# root: "outputs/pconv_ds2_L2L1_perc_edg_sty"
+# root: "outputs/pconv_ds2_L2L1_perc_edg"
+# root: "outputs/pconv_ds2_L2L1_perc"
+# root: "outputs/pconv_ds2_L2L1_edg_sty_lpips"
+# root: "outputs/pconv_ds2_L2L1_edg_lpips"
+# root: "outputs/pconv_ds2_L2L1"
+# root: "outputs/pconv_ds2_L2"
+
+# ================= 通用设置 =================
+device: "cuda:0"
+lpips_net: "alex"
+save_file: "metrics_report.txt"
+
+# ================= 任务列表 =================
+tasks:
+  # ----------------------------------------------------
+  # 任务 1: 投影域 (Non-Raw)
+  # ----------------------------------------------------
+  - name: "Projection_NonRaw_Norm01"
+    domain: "projection"
+    data_range: 1.0
+    lpips_norm: [0.0, 1.0]
+    mask_def:
+      type: "col_truncate"
+      truncate_left: 175
+      truncate_right: 175
+
+    paths:
+      GT: "{root}/gt_volume.npy"
+      targets:
+        Noisy: "{root}/noisy_volume.npy"
+        # [修改] 使用 {root_name} 作为动态名称
+        "{root_name}": "{root}/pred_volume.npy"
+
+  # ----------------------------------------------------
+  # 任务 2: 投影域 (Raw)
+  # ----------------------------------------------------
+  - name: "Projection_Raw_Intensity"
+    domain: "projection"
+    data_range: 255.0
+    lpips_norm: [0.0, 255.0]
+    mask_def:
+      type: "col_truncate"
+      truncate_left: 175
+      truncate_right: 175
+
+    paths:
+      GT: "{root}/gt_volume_raw.npy"
+      targets:
+        Noisy: "{root}/noisy_volume_raw.npy"
+        # [修改] 使用 {root_name}
+        "{root_name}": "{root}/pred_volume_raw.npy"
+
+  # ----------------------------------------------------
+  # 任务 3: 重建域 (HU)
+  # ----------------------------------------------------
+  - name: "Recon_HU"
+    domain: "recon"
+    data_range: 4000.0
+    lpips_norm: [-1000.0, 2000.0]
+    mask_def:
+      type: "circle"
+      center: "mid"
+      radius: 200
+
+    paths:
+      GT: "{root}/recon3d/recon_gt_all_hu.npy"
+      targets:
+        Noisy: "{root}/recon3d/recon_noisy_all_hu.npy"
+        WCE-Hsieh: "{root}/recon3d/recon_wce_hsieh_all_hu.npy"
+        # [修改] 使用 {root_name}
+        "{root_name}": "{root}/recon3d/recon_pred_all_hu.npy"

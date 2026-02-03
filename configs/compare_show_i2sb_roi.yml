@@ -1,36 +1,40 @@
+# 全局变量区 
+# 定义根路径，后续用 {root} 引用，换路径只需改这一行
+root: "outputs/i2sb_local_1step"
+# root: "outputs/pconv_ds2_L2L1_perc_edg_sty"
+
 tasks:
-  - name: recon_slice384
+  # TASK 3D 重建切片
+  - name: recon_batch
     dpi: 220
     figsize: [14, 7]
     title_fontsize: 12
-    out_path: outputs/i2sb_local_1step/figs/compare_recon_z384.png
-    suptitle: "I2SB - Slice 384 (Reconstruction Domain)"
+    
+    # [痛点 2 解决] 批量切片列表
+    slice_list: [128, 256, 384]
+    
+    # [痛点 2 解决] 输出路径带 {slice} 占位符
+    out_path: "{root}/figs/compare_recon_z{slice}.png"
+    
+    # 标题也带占位符
+    # suptitle: "PConv Reconstruction - Slice {slice}"
+    # suptitle: "I2SB-1step Reconstruction - Slice {slice}"
+    suptitle: "Various Reconstruction - Slice {slice}"
     slice_axis: 0
-    slice_index: 384
-  # - name: recon_slice256
-  #   dpi: 220
-  #   figsize: [14, 7]
-  #   title_fontsize: 12
-  #   out_path: outputs/i2sb_local_1step/figs/compare_recon_z256.png
-  #   suptitle: "I2SB - Slice 256 (Reconstruction Domain)"
-  #   slice_axis: 0
-  #   slice_index: 256
-  # - name: recon_slice128
-  #   dpi: 220
-  #   figsize: [14, 7]
-  #   title_fontsize: 12
-  #   out_path: outputs/i2sb_local_1step/figs/compare_recon_z128.png
-  #   suptitle: "I2SB - Slice 128 (Reconstruction Domain)"
-  #   slice_axis: 0
-  #   slice_index: 128
-
+    # slice_index: 会被循环自动覆盖
+    
+    # 痛点 3 路径使用 {root}
+    # 在 HU 域中，热力图最大值设置在 700~1000 是非常标准的做法，用于捕捉骨骼边缘错误和严重的金属/条纹伪影。我们自适应是900符合预期
     paths:
-      GT: outputs/i2sb_local_1step/recon3d/recon_gt_all_hu.npy
-      Noisy: outputs/i2sb_local_1step/recon3d/recon_noisy_all_hu.npy
-      WCE-Hsieh: outputs/i2sb_local_1step/recon3d/recon_wce_hsieh_all_hu.npy
-      I2SB-Pred: outputs/i2sb_local_1step/recon3d/recon_pred_all_hu.npy
+      GT: "{root}/recon3d/recon_gt_all_hu.npy"
+      Noisy: "{root}/recon3d/recon_noisy_all_hu.npy"
+      WCE-Hsieh: "{root}/recon3d/recon_wce_hsieh_all_hu.npy"
+      PConv-Pred: "outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_pred_all_hu.npy"
+      I2SB-Pred: "{root}/recon3d/recon_pred_all_hu.npy"
 
-    include: [Noisy, WCE-Hsieh, I2SB-Pred]
+    include: [Noisy, WCE-Hsieh, PConv-Pred, I2SB-Pred]
+    # include: [Noisy, WCE-Hsieh, I2SB-Pred]
+    # include: [Noisy, WCE-Hsieh, I2SB-Pred]
 
     display:
       mode: window
@@ -41,10 +45,14 @@ tasks:
       enable: true
       cmap: magma
       colorbar: true
+      
+      # 痛点 1 针对重建域，手动设置固定范围 700
+      heat_mode: fixed
+      vmax: 900.0
 
     tiles:
       enable: true
-      dir: outputs/i2sb_local_1step/figs/tiles_recon
+      dir: "{root}/figs/tiles_recon"
       format: png
       heat_with_colorbar: false
 
@@ -54,52 +62,69 @@ tasks:
       linewidth: 2
       tiles:
         enable: true
-        dir: outputs/i2sb_local_1step/figs/tiles_recon_roi
+        dir: "{root}/figs/tiles_recon_roi"
         boxed_enable: true
-        # boxed_dir: outputs/i2sb_local_1step/figs/tiles_recon_roi_boxed
         format: png
         heat_with_colorbar: false
       list:
-        - name: ROI-1_boundary_artifact
+        - name: ROI-1
           color: red
           center_xy_frac: [0.85, 0.50]
           size_wh_px: [128, 128]
-        - name: ROI-2_soft_tissue
+        - name: ROI-2
           color: lime
           center_xy_frac: [0.50, 0.58]
           size_wh_px: [96, 96]
-  
-  
-  - name: proj_angle90
+
+  # 投影域 解决痛点 1
+  - name: proj_view
     dpi: 220
     figsize: [16, 6]
     title_fontsize: 12
-    out_path: outputs/i2sb_local_1step/figs/compare_proj_a090.png
-    suptitle: "I2SB - Projection View a=90 (Projection Domain)"
+    
+    # 这里不需要批量，单张即可，也可以用 slice_list: [90]
+    slice_index: 90
     slice_axis: 0
-    slice_index: 90  # 第 90 帧
+    
+    out_path: "{root}/figs/compare_proj_a90.png"
+    # suptitle: "PConv Projection - Angle 90"
+    # suptitle: "I2SB-1step Projection - Angle 90"
+    suptitle: "Various Projection - Angle 90"
 
     paths:
-      GT: outputs/i2sb_local_1step/gt_volume_raw.npy
-      Noisy: outputs/i2sb_local_1step/noisy_volume_raw.npy
-      I2SB-Pred: outputs/i2sb_local_1step/pred_volume_raw.npy
+      # 关于raw和non-raw的选择：
+      # 投影域raw经过了 反归一化（Denormalized）还原回原始物理域的数据, 原本是 8-bit 图像，范围是 0 ~ 255 符合预期
+      # non-raw则是网络输入输出的归一化后数据 神经网络吐出的: 归一化（Normalization）后的数据，通常被压缩到了 [0, 1] 或 [-1, 1] 之间 热力图的最大值通常在 0.0 ~ 0.5 之间 符合预期
+      
+      # GT: "{root}/gt_volume.npy"
+      # Noisy: "{root}/noisy_volume.npy"
+      # I2SB-Pred: "{root}/pred_volume.npy"
+      # PConv-Pred: "outputs/pconv_ds2_L2L1_perc_edg_sty/pred_volume.npy"
+      GT: "{root}/gt_volume_raw.npy"
+      Noisy: "{root}/noisy_volume_raw.npy"
+      I2SB-Pred: "{root}/pred_volume_raw.npy"
+      PConv-Pred: "outputs/pconv_ds2_L2L1_perc_edg_sty/pred_volume_raw.npy"
 
-    include: [Noisy, I2SB-Pred]
+    include: [Noisy, PConv-Pred, I2SB-Pred]
+    # include: [Noisy, I2SB-Pred]
+    # include: [Noisy, PConv-Pred]
 
     display:
       mode: percentile
       percentile: [1, 99]
-      # 如果0~1域：
-      # mode: fixed01
 
     heatmap:
       enable: true
       cmap: magma
       colorbar: true
+      
+      # 1 针对投影域，手动设置固定范围 <90 30-60
+      heat_mode: fixed
+      vmax: 30
 
     tiles:
       enable: true
-      dir: outputs/i2sb_local_1step/figs/tiles_proj
+      dir: "{root}/figs/tiles_proj"
       format: png
       heat_with_colorbar: false
 
@@ -109,23 +134,151 @@ tasks:
       linewidth: 2
       tiles:
         enable: true
-        dir: outputs/i2sb_local_1step/figs/tiles_proj_roi
+        dir: "{root}/figs/tiles_proj_roi"
         boxed_enable: true
         format: png
         heat_with_colorbar: false
-
-      # 投影域 ROI：两个 boundary + 一个 interior
-      # 下采样后U=620，cut=175，边界在 u=175 和 u=445
+      # 添加第二个 ROI
       list:
-        - name: ROI-Boundary-L
+        # ROI 1: 边界伪影区域
+        - name: Boundary
           color: red
-          center_xy_frac: [0.282, 0.50]   # 175/620
+          center_xy_frac: [0.282, 0.50]  # 左侧边界附近
           size_wh_px: [128, 128]
-        - name: ROI-Boundary-R
-          color: red
-          center_xy_frac: [0.718, 0.50]   # 445/620
-          size_wh_px: [128, 128]
-        - name: ROI-Interior
-          color: lime
-          center_xy_frac: [0.50, 0.60]
-          size_wh_px: [96, 96]
+        
+        # ROI 2: 中心区域 (Interior/Soft Tissue)
+        - name: Center Soft Tissue
+          color: lime                  # 使用不同颜色区分
+          center_xy_frac: [0.50, 0.50] # 图像正中心
+          size_wh_px: [96, 96]         # 稍小一点，或者按需调整 [128, 128]
+# tasks:
+#   - name: recon_slice384
+#     dpi: 220
+#     figsize: [14, 7]
+#     title_fontsize: 12
+#     out_path: outputs/i2sb_local_1step/figs/compare_recon_z384.png
+#     suptitle: "I2SB - Slice 384 (Reconstruction Domain)"
+#     slice_axis: 0
+#     slice_index: 384
+#   # - name: recon_slice256
+#   #   dpi: 220
+#   #   figsize: [14, 7]
+#   #   title_fontsize: 12
+#   #   out_path: outputs/i2sb_local_1step/figs/compare_recon_z256.png
+#   #   suptitle: "I2SB - Slice 256 (Reconstruction Domain)"
+#   #   slice_axis: 0
+#   #   slice_index: 256
+#   # - name: recon_slice128
+#   #   dpi: 220
+#   #   figsize: [14, 7]
+#   #   title_fontsize: 12
+#   #   out_path: outputs/i2sb_local_1step/figs/compare_recon_z128.png
+#   #   suptitle: "I2SB - Slice 128 (Reconstruction Domain)"
+#   #   slice_axis: 0
+#   #   slice_index: 128
+
+#     paths:
+#       GT: outputs/i2sb_local_1step/recon3d/recon_gt_all_hu.npy
+#       Noisy: outputs/i2sb_local_1step/recon3d/recon_noisy_all_hu.npy
+#       WCE-Hsieh: outputs/i2sb_local_1step/recon3d/recon_wce_hsieh_all_hu.npy
+#       I2SB-Pred: outputs/i2sb_local_1step/recon3d/recon_pred_all_hu.npy
+
+#     include: [Noisy, WCE-Hsieh, I2SB-Pred]
+
+#     display:
+#       mode: window
+#       wl: 0
+#       ww: 2000
+
+#     heatmap:
+#       enable: true
+#       cmap: magma
+#       colorbar: true
+
+#     tiles:
+#       enable: true
+#       dir: outputs/i2sb_local_1step/figs/tiles_recon
+#       format: png
+#       heat_with_colorbar: false
+
+#     roi:
+#       enable: true
+#       out_suffix: "_roi"
+#       linewidth: 2
+#       tiles:
+#         enable: true
+#         dir: outputs/i2sb_local_1step/figs/tiles_recon_roi
+#         boxed_enable: true
+#         # boxed_dir: outputs/i2sb_local_1step/figs/tiles_recon_roi_boxed
+#         format: png
+#         heat_with_colorbar: false
+#       list:
+#         - name: ROI-1_boundary_artifact
+#           color: red
+#           center_xy_frac: [0.85, 0.50]
+#           size_wh_px: [128, 128]
+#         - name: ROI-2_soft_tissue
+#           color: lime
+#           center_xy_frac: [0.50, 0.58]
+#           size_wh_px: [96, 96]
+  
+  
+#   - name: proj_angle90
+#     dpi: 220
+#     figsize: [16, 6]
+#     title_fontsize: 12
+#     out_path: outputs/i2sb_local_1step/figs/compare_proj_a090.png
+#     suptitle: "I2SB - Projection View a=90 (Projection Domain)"
+#     slice_axis: 0
+#     slice_index: 90  # 第 90 帧
+
+#     paths:
+#       GT: outputs/i2sb_local_1step/gt_volume_raw.npy
+#       Noisy: outputs/i2sb_local_1step/noisy_volume_raw.npy
+#       I2SB-Pred: outputs/i2sb_local_1step/pred_volume_raw.npy
+
+#     include: [Noisy, I2SB-Pred]
+
+#     display:
+#       mode: percentile
+#       percentile: [1, 99]
+#       # 如果0~1域：
+#       # mode: fixed01
+
+#     heatmap:
+#       enable: true
+#       cmap: magma
+#       colorbar: true
+
+#     tiles:
+#       enable: true
+#       dir: outputs/i2sb_local_1step/figs/tiles_proj
+#       format: png
+#       heat_with_colorbar: false
+
+#     roi:
+#       enable: true
+#       out_suffix: "_roi"
+#       linewidth: 2
+#       tiles:
+#         enable: true
+#         dir: outputs/i2sb_local_1step/figs/tiles_proj_roi
+#         boxed_enable: true
+#         format: png
+#         heat_with_colorbar: false
+
+#       # 投影域 ROI：两个 boundary + 一个 interior
+#       # 下采样后U=620，cut=175，边界在 u=175 和 u=445
+#       list:
+#         - name: ROI-Boundary-L
+#           color: red
+#           center_xy_frac: [0.282, 0.50]   # 175/620
+#           size_wh_px: [128, 128]
+#         - name: ROI-Boundary-R
+#           color: red
+#           center_xy_frac: [0.718, 0.50]   # 445/620
+#           size_wh_px: [128, 128]
+#         - name: ROI-Interior
+#           color: lime
+#           center_xy_frac: [0.50, 0.60]
+#           size_wh_px: [96, 96]

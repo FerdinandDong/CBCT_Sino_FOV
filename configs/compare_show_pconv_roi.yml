@@ -1,29 +1,34 @@
+# 全局变量区 
+# 定义根路径，后续用 {root} 引用，换路径只需改这一行
+root: "outputs/pconv_ds2_L2L1_perc_edg"
+# root: "outputs/pconv_ds2_L2L1_perc_edg_sty"
+
 tasks:
-# 3D 重建域切片对比 (Reconstruction Slice)
-  - name: recon_slice384
+  # TASK 3D 重建切片
+  - name: recon_batch
     dpi: 220
     figsize: [14, 7]
     title_fontsize: 12
-    # 输出路径
-    out_path: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/compare_recon_z384.png
-    # 标题
-    suptitle: "PConv (Perc+Edg+Sty) - Slice 384 (Reconstruction Domain)"
+    
+    # [痛点 2 解决] 批量切片列表
+    slice_list: [128, 256, 384]
+    
+    # [痛点 2 解决] 输出路径带 {slice} 占位符
+    out_path: "{root}/figs/compare_recon_z{slice}.png"
+    
+    # 标题也带占位符
+    suptitle: "PConv Reconstruction - Slice {slice}"
     slice_axis: 0
-    slice_index: 384
-
+    # slice_index: 会被循环自动覆盖
+    
+    # [痛点 3 解决] 路径使用 {root}
     paths:
-      # 数据源路径
-      GT: outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_gt_all_hu.npy
-      Noisy: outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_noisy_all_hu.npy
-      # 如果没 WCE注释
-      WCE-Hsieh: outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_wce_hsieh_all_hu.npy
-      # Key 名
-      PConv-Pred: outputs/pconv_ds2_L2L1_perc_edg_sty/recon3d/recon_pred_all_hu.npy
+      GT: "{root}/recon3d/recon_gt_all_hu.npy"
+      Noisy: "{root}/recon3d/recon_noisy_all_hu.npy"
+      WCE-Hsieh: "{root}/recon3d/recon_wce_hsieh_all_hu.npy"
+      PConv-Pred: "{root}/recon3d/recon_pred_all_hu.npy"
 
-    # 包含列表
     include: [Noisy, WCE-Hsieh, PConv-Pred]
-    # 如果没：
-    # include: [Noisy, PConv-Pred]
 
     display:
       mode: window
@@ -34,15 +39,14 @@ tasks:
       enable: true
       cmap: magma
       colorbar: true
-
-# 强制固定热力图范围
-      heat_mode: fixed   # 改为 fixed
-      vmax: 700.0        # xxx HU (超过变白/最亮) 其实 之前是900自适应
+      
+      # 痛点 1 针对重建域，手动设置固定范围 700
+      heat_mode: fixed
+      vmax: 800.0
 
     tiles:
       enable: true
-      # 小图路径
-      dir: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/tiles_recon
+      dir: "{root}/figs/tiles_recon"
       format: png
       heat_with_colorbar: false
 
@@ -52,42 +56,38 @@ tasks:
       linewidth: 2
       tiles:
         enable: true
-        # ROI 小图路径
-        dir: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/tiles_recon_roi
+        dir: "{root}/figs/tiles_recon_roi"
         boxed_enable: true
         format: png
         heat_with_colorbar: false
       list:
-        - name: ROI-1_boundary_artifact
+        - name: ROI-1
           color: red
           center_xy_frac: [0.85, 0.50]
           size_wh_px: [128, 128]
-        - name: ROI-2_soft_tissue
+        - name: ROI-2
           color: lime
           center_xy_frac: [0.50, 0.58]
           size_wh_px: [96, 96]
-  
-  # 2D 投影域对比 (Projection View)
 
-  - name: proj_angle90
+  # 投影域 解决痛点 1
+  - name: proj_view
     dpi: 220
     figsize: [16, 6]
     title_fontsize: 12
-    # 输出路径
-    out_path: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/compare_proj_a090.png
-    # 
-    suptitle: "PConv (Perc+Edg+Sty) - Projection View a=90"
-    slice_axis: 0
+    
+    # 这里不需要批量，单张即可，也可以用 slice_list: [90]
     slice_index: 90
+    slice_axis: 0
+    
+    out_path: "{root}/figs/compare_proj_a{slice}.png"
+    suptitle: "PConv Projection - Angle {slice}"
 
     paths:
-      # 投影数据路径
-      GT: outputs/pconv_ds2_L2L1_perc_edg_sty/gt_volume_raw.npy
-      Noisy: outputs/pconv_ds2_L2L1_perc_edg_sty/noisy_volume_raw.npy
-      # Key 名
-      PConv-Pred: outputs/pconv_ds2_L2L1_perc_edg_sty/pred_volume_raw.npy
+      GT: "{root}/gt_volume_raw.npy"
+      Noisy: "{root}/noisy_volume_raw.npy"
+      PConv-Pred: "{root}/pred_volume_raw.npy"
 
-    # 包含列表
     include: [Noisy, PConv-Pred]
 
     display:
@@ -98,11 +98,14 @@ tasks:
       enable: true
       cmap: magma
       colorbar: true
+      
+      # # 1 针对投影域，手动设置固定范围 60
+      # heat_mode: fixed
+      # vmax: 1
 
     tiles:
       enable: true
-      # [修改] 小图路径
-      dir: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/tiles_proj
+      dir: "{root}/figs/tiles_proj"
       format: png
       heat_with_colorbar: false
 
@@ -112,22 +115,12 @@ tasks:
       linewidth: 2
       tiles:
         enable: true
-        # [修改] ROI 小图路径
-        dir: outputs/pconv_ds2_L2L1_perc_edg_sty/figs/tiles_proj_roi
+        dir: "{root}/figs/tiles_proj_roi"
         boxed_enable: true
         format: png
         heat_with_colorbar: false
-
       list:
-        - name: ROI-Boundary-L
+        - name: Boundary
           color: red
           center_xy_frac: [0.282, 0.50]
           size_wh_px: [128, 128]
-        - name: ROI-Boundary-R
-          color: red
-          center_xy_frac: [0.718, 0.50]
-          size_wh_px: [128, 128]
-        - name: ROI-Interior
-          color: lime
-          center_xy_frac: [0.50, 0.60]
-          size_wh_px: [96, 96]
