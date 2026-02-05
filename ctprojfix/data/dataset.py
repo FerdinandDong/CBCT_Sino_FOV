@@ -158,7 +158,7 @@ class ProjectionAnglesDataset(Dataset):
       noisy: projectionNoisy{ID}.tif (A,H,W) 或 (H,W)
       clean: projection{ID}.tif      (A,H,W) 或 (H,W)
 
-    可选开关（向后兼容）：
+    可选开关：
       - return_norm_stats: bool（默认 False）
         * False：行为与旧版本完全一致（训练不受影响）
         * True：额外返回每帧的 noisy_lo/noisy_hi/gt_lo/gt_hi 四个标量
@@ -399,6 +399,7 @@ def _subset_indices_from_files(ds: ProjectionAnglesDataset, split_cfg):  # >>> s
         collect(split_cfg['train_list']),
         collect(split_cfg['val_list']),
         collect(split_cfg['test_list']),
+        collect(split_cfg['temp_test_list']),
     )
 
 
@@ -444,7 +445,7 @@ def make_dataloader(cfg):
     读取 cfg 并构造 DataLoader。
     支持：
       - split: files | ratio（返回 {train,val,test} 字典）
-      - 无 split：返回单个 DataLoader（兼容旧代码）
+      - 无 split：返回单个 DataLoader
       - persistent_workers / prefetch_factor
       - exclude_ids: [0,10,11]
     """
@@ -488,7 +489,7 @@ def make_dataloader(cfg):
     # 有 split：生成三份子集
     mode = str(split_cfg.get('mode', 'ratio')).lower()
     if mode == 'files':
-        idx_tr, idx_va, idx_te = _subset_indices_from_files(ds_full, split_cfg)
+        idx_tr, idx_va, idx_te, idx_tmp = _subset_indices_from_files(ds_full, split_cfg)
     elif mode == 'ratio':
         idx_tr, idx_va, idx_te = _subset_indices_by_ratio(ds_full, split_cfg)
     else:
@@ -497,6 +498,9 @@ def make_dataloader(cfg):
     ds_tr = Subset(ds_full, idx_tr)
     ds_va = Subset(ds_full, idx_va)
     ds_te = Subset(ds_full, idx_te)
+    ds_tmp = Subset(ds_full, idx_tmp) if 'idx_tmp' in locals() else None
+
+     # 构造 DataLoader
 
     common = dict(num_workers=nw, pin_memory=pin, drop_last=False)
     if nw > 0:
@@ -506,5 +510,8 @@ def make_dataloader(cfg):
     train_loader = DataLoader(ds_tr, batch_size=bs, shuffle=True,  **common)
     val_loader   = DataLoader(ds_va, batch_size=int(cfg.get('val_batch_size', bs)),  shuffle=False, **common)
     test_loader  = DataLoader(ds_te, batch_size=int(cfg.get('test_batch_size', bs)), shuffle=False, **common)
+    tmp_loader   = DataLoader(ds_tmp, batch_size=int(cfg.get('tmp_batch_size', bs)), shuffle=False, **common) if ds_tmp is not None else None
+    
 
-    return {"train": train_loader, "val": val_loader, "test": test_loader}
+
+    return {"train": train_loader, "val": val_loader, "test": test_loader, "temp_test": tmp_loader}

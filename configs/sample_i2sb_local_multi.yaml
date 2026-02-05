@@ -3,7 +3,7 @@
 model:
   name: i2sb_local_multi
   params:
-    in_ch: 4        # noisy+mask+angle + t_map
+    in_ch: 5        # noisy+mask+angle + t_map
     base: 64
     depth: 4
     emb_dim: 256
@@ -16,7 +16,8 @@ data:
   ids: []
   exclude_ids: []
   step: 1
-  downsample: 2
+  # downsample: 2
+  downsample: 8               #########先改成4 用来快速验证 最终会结果看齐2!!!!!!!!!!!!!!!!!
   truncate_left: 350
   truncate_right: 350
   mask_mode: fixed
@@ -34,6 +35,7 @@ data:
     train_list: splits/train.txt
     val_list:   splits/val.txt
     test_list:  splits/test.txt
+    temp_test_list:  splits/temp_test.txt
   
   shuffle: false
   return_norm_stats: true
@@ -44,17 +46,14 @@ train:
   ckpt_prefix: i2sb_local_multi
 
 sample:
-  # 指向训练好的随机 t 模型
   ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best.pth
-  
-  split: test
-  out_dir: outputs/i2sb_local_multi_10step  # 区分输出文件夹
-  
-  # 
-  # 比 1 step 更好的细节和一致性
-  steps: 10
-  
-  pick_id: 10
+  # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best_old.pth
+  # split: test
+  split: temp_test  # 使用临时测试集
+  out_dir: outputs/i2sb_local_multi_20step
+  steps: 5
+  sigma_T: 1.0      # 显式写
+  pick_id: 10       # 显式写test10
   pick_angle: 90
   
   save_quad: true

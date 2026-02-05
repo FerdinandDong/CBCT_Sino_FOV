@@ -1,16 +1,20 @@
 # scripts/sample_i2sb_local_multi.py
 # -*- coding: utf-8 -*-
-import os, argparse, yaml, csv, torch, numpy as np
+import os, argparse, yaml, csv, math
+import torch, numpy as np
 import tifffile as tiff
 import torch.nn.functional as F
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple
 from tqdm import tqdm
 
-# 直接运行 python -m scripts.sample_i2sb_local_multi
+# run: python -m scripts.sample_i2sb_local_multi
 from ctprojfix.data.dataset import make_dataloader
 from ctprojfix.models.i2sb_unet import I2SBUNet
 
-#辅助函数区完全复用原版
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
 
 def load_cfg(p: str) -> Dict[str, Any]:
     with open(p, "r", encoding="utf-8") as f:
@@ -100,14 +104,13 @@ def save_quad_and_tiles(noisy01: np.ndarray,
     p = np.clip(pred01.astype(np.float32),  0, 1)
     g = np.clip(gt01.astype(np.float32),    0, 1) if gt01 is not None else None
 
-    # ---- 四连图 ----
     if g is not None:
         err = np.abs(p - g)
         fig, axes = plt.subplots(1, 4, figsize=(14, 4))
         axes[0].imshow(n, cmap="gray", vmin=0, vmax=1); axes[0].set_title("Noisy"); axes[0].axis("off")
         axes[1].imshow(p, cmap="gray", vmin=0, vmax=1); axes[1].set_title("Pred (Multi)");  axes[1].axis("off")
         axes[2].imshow(g, cmap="gray", vmin=0, vmax=1); axes[2].set_title("GT");    axes[2].axis("off")
-        im = axes[3].imshow(err, cmap=str(tiles_cfg.get("cmap","magma")), vmin=0.0, vmax=None)
+        im = axes[3].imshow(err, cmap=str((tiles_cfg or {}).get("cmap","magma")), vmin=0.0, vmax=None)
         axes[3].set_title("|Pred-GT|"); axes[3].axis("off")
         fig.colorbar(im, ax=axes[3], fraction=0.046, pad=0.04)
         plt.tight_layout()
@@ -126,18 +129,17 @@ def save_quad_and_tiles(noisy01: np.ndarray,
         print(f"[FIG] {out_path}")
         return
 
-    # ---- tiles（可选）----
     if not bool((tiles_cfg or {}).get("enable", False)):
         return
-    tiles_dir = tiles_cfg.get("dir", None)
+    tiles_dir = (tiles_cfg or {}).get("dir", None)
     if not tiles_dir:
         tiles_dir = os.path.join(fig_dir, f"{name}_tiles")
     _ensure_dir(tiles_dir)
 
-    prefix = str(tiles_cfg.get("prefix", ""))
-    fmt = str(tiles_cfg.get("format", "png"))
-    cmap = str(tiles_cfg.get("cmap", "magma"))
-    with_cb = bool(tiles_cfg.get("heat_with_colorbar", False))
+    prefix = str((tiles_cfg or {}).get("prefix", ""))
+    fmt = str((tiles_cfg or {}).get("format", "png"))
+    cmap = str((tiles_cfg or {}).get("cmap", "magma"))
+    with_cb = bool((tiles_cfg or {}).get("heat_with_colorbar", False))
 
     _save_tile_gray01(n, os.path.join(tiles_dir, f"{prefix}Noisy.{fmt}"))
     _save_tile_gray01(p, os.path.join(tiles_dir, f"{prefix}Pred.{fmt}"))
@@ -184,24 +186,106 @@ def _get_scalar_from_batch(batch: Dict[str, Any], key: str, idx: int, default=No
         return default
     return v
 
-# ----------------- 主逻辑区 -----------------
+
+# -----------------------------------------------------------------------------
+# Core: deterministic multi-step bridge sampling
+# net input is 5ch: [xt, x1_img, mask, angle, t_map]
+# add_angle_channel == True 恒成立 => inp has 3 channels: [noisy, mask, angle] in [0,1]
+# -----------------------------------------------------------------------------
+
+def _pad_inputs_for_unet(x1_img_m1: torch.Tensor,
+                         mask01: torch.Tensor,
+                         angle01: torch.Tensor,
+                         factor: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+    """
+    Pad to multiples of factor.
+    - image: reflect
+    - mask:  constant 0
+    - angle: replicate
+    """
+    B, _, H, W = x1_img_m1.shape
+    Ht = _ceil_to(H, factor)
+    Wt = _ceil_to(W, factor)
+    if (Ht, Wt) == (H, W):
+        return x1_img_m1, mask01, angle01, Ht, Wt
+
+    pad = (0, Wt - W, 0, Ht - H)
+    x1_img_m1 = F.pad(x1_img_m1, pad, mode="reflect")
+    mask01    = F.pad(mask01,    pad, mode="constant", value=0.0)
+    angle01   = F.pad(angle01,   pad, mode="replicate")
+    return x1_img_m1, mask01, angle01, Ht, Wt
+
+
+def sample_multi_step(net: torch.nn.Module,
+                      x1_img_m1: torch.Tensor,   # (B,1,H,W) in [-1,1]
+                      mask01: torch.Tensor,      # (B,1,H,W) in [0,1]
+                      angle01: torch.Tensor,     # (B,1,H,W) in [0,1]
+                      depth_down: int,
+                      steps: int,
+                      sigma_T: float) -> torch.Tensor:
+    """
+    Deterministic multi-step sampling with shared epsilon:
+      x_t = (1-t)x0 + t*x1 + sigma_T*sqrt(t(1-t))*eps
+    Start from t=1: x_1 = x1
+    Update towards t=0 using predicted x0.
+    Return x0_hat in [-1,1] (same H,W as input).
+    """
+    device = x1_img_m1.device
+    B, _, H, W = x1_img_m1.shape
+
+    factor = 2 ** max(depth_down, 0)
+    x1p, mp, ap, Ht, Wt = _pad_inputs_for_unet(x1_img_m1, mask01, angle01, factor)
+
+    xt = x1p.clone()  # init at t=1
+    ts = torch.linspace(1.0, 0.0, steps + 1, device=device)
+
+    eps = 1e-6
+    for k in range(steps):
+        t = float(ts[k].item())
+        s = float(ts[k + 1].item())
+
+        t_map = torch.full((B, 1, Ht, Wt), t, device=device, dtype=torch.float32)
+
+        # 5ch: [xt, x1_img, mask, angle, t_map]
+        net_in = torch.cat([xt, x1p, mp, ap, t_map], dim=1)
+        x0_hat = net(net_in)  # (B,1,Ht,Wt) in [-1,1]
+
+        if x0_hat.shape[-2:] != (Ht, Wt):
+            x0_hat = F.interpolate(x0_hat, size=(Ht, Wt), mode="bilinear", align_corners=False)
+
+        sig_t = sigma_T * math.sqrt(max(t * (1.0 - t), 0.0))
+        sig_s = sigma_T * math.sqrt(max(s * (1.0 - s), 0.0))
+
+        if sig_t < 1e-8:
+            eps_hat = torch.zeros_like(xt)
+        else:
+            eps_hat = (xt - (1.0 - t) * x0_hat - t * x1p) / (sig_t + eps)
+
+        xt = (1.0 - s) * x0_hat + s * x1p + sig_s * eps_hat
+
+    xt = xt[..., :H, :W]
+    return xt
+
+
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 
 @torch.no_grad()
 def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
     cfg = load_cfg(cfg_path)
     train_cfg = cfg.get("train", {})
-    dev = torch.device(train_cfg.get("device","cuda") if torch.cuda.is_available() else "cpu")
+    dev = torch.device(train_cfg.get("device", "cuda") if torch.cuda.is_available() else "cpu")
 
-    # 1. DataLoader
+    # 1) DataLoader
     data_cfg = dict(cfg["data"])
-    data_cfg["shuffle"] = False # 采样必须有序
+    data_cfg["shuffle"] = False
     dl = make_dataloader(data_cfg)
 
     want = str(cfg.get("sample", {}).get("split", "") or "").lower().strip()
-
     if isinstance(dl, dict):
         if not want:
-            raise RuntimeError("[I2SB Multi] make_dataloader returned split, but sample.split not set.")
+            raise RuntimeError("[I2SB Multi] make_dataloader returned split dict, but sample.split not set.")
         if want not in dl or dl[want] is None:
             raise RuntimeError(f"[I2SB Multi] split '{want}' not found.")
         loader = dl[want]
@@ -209,19 +293,29 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
     else:
         loader = dl
         print(f"[I2SB Multi] single loader size={len(loader.dataset)}")
-        if len(loader.dataset) <= 0: raise RuntimeError("DataLoader is empty.")
+        if len(loader.dataset) <= 0:
+            raise RuntimeError("DataLoader is empty.")
 
-    # 2. Model & Checkpoint
+    # 2) Model & Checkpoint
     mp = cfg["model"]["params"]
-    net = I2SBUNet(in_ch=mp.get("in_ch",4), base=mp.get("base",64), depth=mp.get("depth",4),
-                   emb_dim=mp.get("emb_dim",256), dropout=mp.get("dropout",0.0)).to(dev)
-    
+
+    in_ch = int(mp.get("in_ch", 5))
+    if in_ch != 5:
+        print(f"[WARN] model.in_ch={in_ch}, but sampling expects 5ch input. For add_angle_channel=True it MUST be 5.")
+    net = I2SBUNet(
+        in_ch=in_ch,
+        base=int(mp.get("base", 64)),
+        depth=int(mp.get("depth", 4)),
+        emb_dim=int(mp.get("emb_dim", 256)),
+        dropout=float(mp.get("dropout", 0.0))
+    ).to(dev)
+
     ckpt_path = ckpt
     if ckpt_path is None:
         ckpt_dir = train_cfg.get("ckpt_dir", "checkpoints/i2sb_local_multi")
         ckpt_prefix = train_cfg.get("ckpt_prefix", "i2sb_local_multi")
         ckpt_path = cfg.get("sample", {}).get("ckpt", os.path.join(ckpt_dir, f"{ckpt_prefix}_best.pth"))
-    
+
     if ckpt_path and os.path.isfile(ckpt_path):
         ck = torch.load(ckpt_path, map_location=dev)
         state = ck.get("state_dict", ck)
@@ -231,253 +325,249 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
         print(f"[WARN] ckpt not found: {ckpt_path} !!! Result might be random noise.")
     net.eval()
 
-    # 3. Output Dir & Params
-    out_dir = out or cfg.get("sample", {}).get("out_dir", "outputs/i2sb_local_multi_10step")
+    # depth_down
+    net_core = net.module if hasattr(net, "module") else net
+    depth_down = len(getattr(net_core, "downs", []))
+
+    # 3) Output Dir & Params
+    out_dir = out or cfg.get("sample", {}).get("out_dir", "outputs/i2sb_local_multi")
     os.makedirs(out_dir, exist_ok=True)
 
     pick_id    = cfg.get("sample", {}).get("pick_id", None)
     pick_angle = cfg.get("sample", {}).get("pick_angle", None)
-    
-    # Multi-step 参数 !!!!!!!!!!!!!!!!!!!!!!
+
     steps = int(cfg.get("sample", {}).get("steps", 10))
-    print(f"[I2SB Multi] Inference using K = {steps} steps.")
+    sigma_T = float(cfg.get("sample", {}).get("sigma_T", cfg.get("train", {}).get("sigma_T", 1.0)))
 
-    # 4. 核心采样函数：Multi-step 循环
-    def sample_multi_step(x1_full: torch.Tensor, depth_down:int, H:int, W:int) -> torch.Tensor:
-        """
-        输入: x1_full (B, C, H, W)，通道 0 为 Noisy，其余为 Mask/Angle
-        输出: x0_clean (B, 1, H, W)
-        """
-        n_down = depth_down
-        factor = 2 ** max(n_down, 0)
-        Ht, Wt = _ceil_to(H, factor), _ceil_to(W, factor)
-        
-        # Pad
-        if (Ht, Wt) != (H, W):
-            pad = (0, Wt - W, 0, Ht - H)
-            x1_full = F.pad(x1_full, pad, mode="reflect")
-            
-        B = x1_full.shape[0]
-        
-        # 拆分
-        x1_img = x1_full[:, 0:1, ...] # The degraded image (noisy)
-        conds  = x1_full[:, 1:,  ...] # mask, angle
-        
-        # 初始化 xt = x1
-        xt = x1_img.clone()
-        
-        # 时间表：从 1.0 降到 0.0
-        timesteps = np.linspace(1.0, 0.0, steps + 1)
-        
-        # 迭代循环
-        for i in range(steps):
-            t_curr = timesteps[i]
-            t_next = timesteps[i+1]
-            
-            # 构造输入 [xt, mask, angle, t_map]
-            t_map = torch.full((B, 1, Ht, Wt), float(t_curr), device=dev, dtype=torch.float32)
-            net_in = torch.cat([xt, conds, t_map], dim=1)
-            
-            # 预测 x0
-            pred_x0 = net(net_in)
-            
-            # I2SB 确定性更新: 插值到下一个时间步
-            xt = (1 - t_next) * pred_x0 + t_next * x1_img
-            
-        # 最终裁回
-        if xt.shape[-2] >= H and xt.shape[-1] >= W:
-            xt = xt[..., :H, :W]
-        if xt.shape[-2:] != (H, W):
-            xt = F.interpolate(xt, size=(H, W), mode="bilinear", align_corners=False)
-            
-        return xt
+    # !!!!!!!!强制有效区保持原输入（切割中间fov调试用；默认 False）!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    blend_valid = bool(cfg.get("sample", {}).get("blend_valid", False))
 
-    depth_down = len(getattr(net, "downs", []))
+    print(f"[I2SB Multi] Inference using K={steps} | sigma_T={sigma_T} | blend_valid={blend_valid}")
 
-    # 5. 执行推理
+    # 4) Inference
     if pick_id is not None:
-        # ------- 单卷模式 (Single Volume) -------
         pick_id = int(pick_id)
         print(f"[I2SB Multi] Processing single volume ID={pick_id}...")
 
         preds, gts, noisies = [], [], []
+        preds_blend = []  # optional
         preds_raw, gts_raw, noisies_raw = [], [], []
         id_rows, angle_rows, A_rows = [], [], []
-        
-        # Metrics buffers
+
         noisy_lo_rows, noisy_hi_rows = [], []
         gt_lo_rows, gt_hi_rows = [], []
         psnr_rows, ssim_rows = [], []
 
-        best_one = None # For plotting
-        
-        # 使用 tqdm 进度条遍历
+        best_one = None
+
         pbar = tqdm(loader, desc=f"ID={pick_id}", ncols=100)
         for batch in pbar:
-            # ID 过滤
             bid = batch.get("id", None)
             if torch.is_tensor(bid): ids = bid.detach().cpu().numpy().tolist()
             elif isinstance(bid, (list, tuple, np.ndarray)): ids = list(bid)
             else: ids = [bid]
-            
+
             hit = [i for i, v in enumerate(ids) if int(v) == pick_id]
-            if not hit: continue
-            
-            # 准备数据
-            x1_full = batch["inp"].to(dev).float() * 2.0 - 1.0
-            B, _, H, W = x1_full.shape
-            
-            # 调用 Multi-step 采样 
-            x0_hat = sample_multi_step(x1_full, depth_down, H, W) # (B, 1, H, W)
-            
-            # 后处理
-            x0 = ((x0_hat.clamp(-1,1) + 1.0) * 0.5).cpu().numpy()
-            noisy = batch["inp"][:, 0:1].cpu().numpy()
+            if not hit:
+                continue
+
+            inp = batch["inp"].to(dev).float()  # (B,3,H,W) in [0,1] => [noisy, mask, angle]
+            if inp.shape[1] < 3:
+                raise RuntimeError("add_angle_channel must be true: inp should be 3ch [noisy, mask, angle].")
+
+            x1_img01 = inp[:, 0:1, ...]
+            mask01   = inp[:, 1:2, ...].clamp(0.0, 1.0)
+            angle01  = inp[:, 2:3, ...].clamp(0.0, 1.0)
+
+            x1_img_m1 = x1_img01 * 2.0 - 1.0
+
+            x0_hat_m1 = sample_multi_step(
+                net=net,
+                x1_img_m1=x1_img_m1,
+                mask01=mask01,
+                angle01=angle01,
+                depth_down=depth_down,
+                steps=steps,
+                sigma_T=sigma_T
+            )
+
+            pred01 = ((x0_hat_m1.clamp(-1, 1) + 1.0) * 0.5)  # (B,1,H,W) [0,1]
+
+            # optional: keep valid region from input x1 (debug/visual)
+            if blend_valid:
+                pred01_blend = pred01 * (1.0 - mask01) + x1_img01 * mask01
+            else:
+                pred01_blend = None
+
+            pred_np = pred01.detach().cpu().numpy()
+            noisy_np = x1_img01.detach().cpu().numpy()
+            pred_bl_np = pred01_blend.detach().cpu().numpy() if pred01_blend is not None else None
+
             has_gt = ("gt" in batch)
             gt_np = batch["gt"].cpu().numpy() if has_gt else None
-            
-            # 元数据解析 (Angle/A)
-            angles = batch.get("angle", [None]*B)
+
+            angles = batch.get("angle", [None] * inp.shape[0])
             if torch.is_tensor(angles): angles = angles.cpu().numpy().tolist()
-            A_arr = batch.get("A", [None]*B)
+            A_arr = batch.get("A", [None] * inp.shape[0])
             if torch.is_tensor(A_arr): A_arr = A_arr.cpu().numpy().tolist()
 
-            # 收集结果
             for i in hit:
-                pred_i = np.squeeze(x0[i,0])
-                noz_i  = np.squeeze(noisy[i,0])
-                gt_i   = np.squeeze(gt_np[i,0]) if has_gt else None
-                
+                pred_i = np.squeeze(pred_np[i, 0])
+                predb_i = np.squeeze(pred_bl_np[i, 0]) if pred_bl_np is not None else None
+                noz_i  = np.squeeze(noisy_np[i, 0])
+                gt_i   = np.squeeze(gt_np[i, 0]) if has_gt else None
+
                 preds.append(pred_i)
                 noisies.append(noz_i)
-                if has_gt: gts.append(gt_i)
-                
-                # Meta
+                if predb_i is not None:
+                    preds_blend.append(predb_i)
+                if has_gt:
+                    gts.append(gt_i)
+
                 ai = angles[i] if angles[i] is not None else -1
                 Ai = A_arr[i] if A_arr[i] is not None else 360
                 angle_rows.append(ai)
                 A_rows.append(Ai)
                 id_rows.append(pick_id)
-                
-                # Raw stats
+
                 nlo = _get_scalar_from_batch(batch, "noisy_lo", i)
                 nhi = _get_scalar_from_batch(batch, "noisy_hi", i)
                 glo = _get_scalar_from_batch(batch, "gt_lo", i)
                 ghi = _get_scalar_from_batch(batch, "gt_hi", i)
                 noisy_lo_rows.append(nlo); noisy_hi_rows.append(nhi)
                 gt_lo_rows.append(glo); gt_hi_rows.append(ghi)
-                
-                # Restore Raw
-                if (glo is not None) and (ghi is not None):
+
+                if (glo is not None) and (ghi is not None) and (gt_i is not None):
                     pr_raw = pred_i * (ghi - glo) + glo
-                    g_raw = gt_i * (ghi - glo) + glo
-                else: pr_raw, g_raw = None, None
-                
+                    g_raw  = gt_i   * (ghi - glo) + glo
+                else:
+                    pr_raw, g_raw = None, None
+
                 if (nlo is not None) and (nhi is not None):
                     n_raw = noz_i * (nhi - nlo) + nlo
-                else: n_raw = None
-                
+                else:
+                    n_raw = None
+
                 preds_raw.append(pr_raw)
                 gts_raw.append(g_raw)
                 noisies_raw.append(n_raw)
-                
-                # Metrics
+
                 if has_gt and gt_i is not None:
                     ps = _psnr01(pred_i, gt_i)
                     ss = _ssim2d(pred_i, gt_i)
-                else: ps, ss = None, None
+                else:
+                    ps, ss = None, None
                 psnr_rows.append(ps); ssim_rows.append(ss)
-                
-                # Find best frame for visual
-                if pick_angle is not None:
-                    if str(pick_angle).lower() == "mid": pass
-                    else:
-                        want_a = int(pick_angle)
-                        diff = abs(int(ai) - want_a) if ai >= 0 else 9999
-                        if best_one is None or diff < best_one[0]:
-                            best_one = (diff, dict(pred=pred_i, noisy=noz_i, gt=gt_i, angle=ai))
+
+                if pick_angle is not None and str(pick_angle).lower() != "mid":
+                    want_a = int(pick_angle)
+                    diff = abs(int(ai) - want_a) if ai >= 0 else 9999
+                    if best_one is None or diff < best_one[0]:
+                        best_one = (diff, dict(pred=pred_i, noisy=noz_i, gt=gt_i, angle=ai))
 
         if len(preds) == 0:
             raise RuntimeError(f"[I2SB Multi] pick_id={pick_id} not found in split.")
 
-        # 排序
         order = list(range(len(preds)))
         order.sort(key=lambda k: (angle_rows[k] < 0, angle_rows[k]))
-        
+
         def reorder(lst): return [lst[k] for k in order]
-        preds = reorder(preds); noisies = reorder(noisies); 
-        if gts: gts = reorder(gts)
+        preds = reorder(preds); noisies = reorder(noisies)
+        if preds_blend:
+            preds_blend = reorder(preds_blend)
+        if gts:
+            gts = reorder(gts)
         preds_raw = reorder(preds_raw); gts_raw = reorder(gts_raw); noisies_raw = reorder(noisies_raw)
         id_rows = reorder(id_rows); angle_rows = reorder(angle_rows); A_rows = reorder(A_rows)
         noisy_lo_rows = reorder(noisy_lo_rows); noisy_hi_rows = reorder(noisy_hi_rows)
         gt_lo_rows = reorder(gt_lo_rows); gt_hi_rows = reorder(gt_hi_rows)
         psnr_rows = reorder(psnr_rows); ssim_rows = reorder(ssim_rows)
 
-        # 保存 Volume
         vol_pred = np.stack(preds, axis=0).astype(np.float32)
         tiff.imwrite(os.path.join(out_dir, "pred_volume.tiff"), vol_pred, imagej=True)
         np.save(os.path.join(out_dir, "pred_volume.npy"), vol_pred)
-        
+
+        if preds_blend:
+            vol_pb = np.stack(preds_blend, axis=0).astype(np.float32)
+            tiff.imwrite(os.path.join(out_dir, "pred_volume_blend.tiff"), vol_pb, imagej=True)
+            np.save(os.path.join(out_dir, "pred_volume_blend.npy"), vol_pb)
+
         vol_nozy = np.stack(noisies, axis=0).astype(np.float32)
         tiff.imwrite(os.path.join(out_dir, "noisy_volume.tiff"), vol_nozy, imagej=True)
-        
+
         if gts:
             vol_gt = np.stack(gts, axis=0).astype(np.float32)
             tiff.imwrite(os.path.join(out_dir, "gt_volume.tiff"), vol_gt, imagej=True)
-        
-        # 保存 RAW Volume
-        if all(x is not None for x in preds_raw):
+
+        if len(preds_raw) > 0 and all(x is not None for x in preds_raw):
             vol_pr = np.stack(preds_raw, axis=0).astype(np.float32)
             tiff.imwrite(os.path.join(out_dir, "pred_volume_raw.tiff"), vol_pr, imagej=True)
             np.save(os.path.join(out_dir, "pred_volume_raw.npy"), vol_pr)
 
-        # CSV Metrics
         csv_path = os.path.join(out_dir, "metrics.csv")
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["idx","id","angle","A","nlo","nhi","glo","ghi","PSNR","SSIM"])
-            for idx, val in enumerate(zip(id_rows, angle_rows, A_rows, noisy_lo_rows, noisy_hi_rows, gt_lo_rows, gt_hi_rows, psnr_rows, ssim_rows)):
-                # val is tuple, unpack safely
+            for idx, val in enumerate(zip(id_rows, angle_rows, A_rows,
+                                          noisy_lo_rows, noisy_hi_rows,
+                                          gt_lo_rows, gt_hi_rows,
+                                          psnr_rows, ssim_rows)):
                 w.writerow([idx] + [x if x is not None else "" for x in val])
         print(f"[Done] Metrics saved to {csv_path}")
-        
-        # 平均指标
+
         ps_valid = [x for x in psnr_rows if x is not None]
         ss_valid = [x for x in ssim_rows if x is not None]
         if ps_valid:
             print(f"[Result] ID={pick_id} | K={steps} | PSNR={np.mean(ps_valid):.3f} | SSIM={np.mean(ss_valid):.4f}")
 
-        # 图片导出
         if pick_angle is not None:
             if best_one:
                 rec = best_one[1]
-            else: # fallback mid
+            else:
                 mid = len(preds)//2
                 rec = dict(pred=preds[mid], noisy=noisies[mid], gt=gts[mid] if gts else None, angle=angle_rows[mid])
-            
+
             tiles_cfg = (cfg.get("sample", {}).get("tiles", {}) or {})
             ph, pw = rec["pred"].shape
             nn, gg = _match_to_pred_size((ph, pw), rec["noisy"], rec["gt"])
-            aname = f"{int(rec['angle']):03d}" if rec['angle'] >=0 else "xxx"
+            aname = f"{int(rec['angle']):03d}" if rec["angle"] >= 0 else "xxx"
             save_quad_and_tiles(nn, rec["pred"], gg, out_dir, f"id{pick_id}_a{aname}_step{steps}", tiles_cfg)
-            
+
     else:
-        # 全量模式 All Data 
         print(f"[I2SB Multi] Processing ALL data in split '{want}'...")
         preds = []
+
         pbar = tqdm(loader, ncols=80)
         for batch in pbar:
-            x1_full = batch["inp"].to(dev).float() * 2.0 - 1.0
-            B, _, H, W = x1_full.shape
-            x0_hat = sample_multi_step(x1_full, depth_down, H, W)
-            x0 = ((x0_hat.clamp(-1,1) + 1.0) * 0.5).cpu().numpy()
-            for i in range(B):
-                preds.append(np.squeeze(x0[i,0]))
-                
-        if not preds: raise RuntimeError("No predictions generated.")
+            inp = batch["inp"].to(dev).float()
+            if inp.shape[1] < 3:
+                raise RuntimeError("add_angle_channel must be true: inp should be 3ch [noisy, mask, angle].")
+
+            x1_img01 = inp[:, 0:1, ...]
+            mask01   = inp[:, 1:2, ...].clamp(0.0, 1.0)
+            angle01  = inp[:, 2:3, ...].clamp(0.0, 1.0)
+            x1_img_m1 = x1_img01 * 2.0 - 1.0
+
+            x0_hat_m1 = sample_multi_step(
+                net=net,
+                x1_img_m1=x1_img_m1,
+                mask01=mask01,
+                angle01=angle01,
+                depth_down=depth_down,
+                steps=steps,
+                sigma_T=sigma_T
+            )
+            pred01 = ((x0_hat_m1.clamp(-1, 1) + 1.0) * 0.5).cpu().numpy()
+
+            for i in range(pred01.shape[0]):
+                preds.append(np.squeeze(pred01[i, 0]))
+
+        if not preds:
+            raise RuntimeError("No predictions generated.")
         vol = np.stack(preds, axis=0).astype(np.float32)
         tiff.imwrite(os.path.join(out_dir, "pred_volume_all.tiff"), vol, imagej=True)
         print(f"[Done] Saved all predictions to {out_dir}")
+
 
 def main():
     ap = argparse.ArgumentParser()

@@ -1,9 +1,10 @@
 # ctprojfix/trainers/i2sb_local_multi.py
-# multi step I2SB trainer
+# multi step I2SB trainer (random-t bridge training, one-step val/preview)
 # -*- coding: utf-8 -*-
-import os, csv, math, sys
+import os, csv, sys
+import glob, re
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import torch
 import torch.nn as nn
@@ -19,6 +20,7 @@ def _create_grad_scaler(enabled: bool):
         return torch.amp.GradScaler("cuda", enabled=enabled)
     except Exception:
         return torch.cuda.amp.GradScaler(enabled=enabled)
+
 
 class _autocast_ctx:
     def __init__(self, enabled: bool, device_type: str = "cuda"):
@@ -39,6 +41,7 @@ class _autocast_ctx:
         if self.enabled and self.ctx is not None:
             return self.ctx.__exit__(exc_type, exc_val, exc_tb)
         return False
+
 
 # ---------------- EMA ----------------
 class EMA:
@@ -99,7 +102,6 @@ def _save_triptych(noisy01, pred01, gt01, out_path, title=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import numpy as np
 
     n = _percentile_norm01(noisy01)
     p = _percentile_norm01(pred01)
@@ -109,7 +111,8 @@ def _save_triptych(noisy01, pred01, gt01, out_path, title=None):
     axes[0].imshow(n, cmap="gray"); axes[0].set_title("Noisy"); axes[0].axis("off")
     axes[1].imshow(p, cmap="gray"); axes[1].set_title("Pred");  axes[1].axis("off")
     axes[2].imshow(g, cmap="gray"); axes[2].set_title("GT");    axes[2].axis("off")
-    if title: fig.suptitle(title)
+    if title:
+        fig.suptitle(title)
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -117,26 +120,183 @@ def _save_triptych(noisy01, pred01, gt01, out_path, title=None):
     print(f"[PREVIEW] {out_path}")
 
 
+def _pad_conds(mask_and_maybe_angle: torch.Tensor, pad, has_angle: bool) -> torch.Tensor:
+    """
+    conds: [mask, (angle)] in [0,1]
+    - mask pad: constant 0  (pad 区必须视为 missing)
+    - angle pad: replicate (更合理：边缘延拓)
+    """
+    if mask_and_maybe_angle is None:
+        return None
+    conds = mask_and_maybe_angle
+    if conds.shape[1] <= 0:
+        return conds
+    mask = conds[:, 0:1, ...]
+    mask = F.pad(mask, pad, mode="constant", value=0.0)
+
+    if has_angle and conds.shape[1] > 1:
+        ang = conds[:, 1:, ...]
+        ang = F.pad(ang, pad, mode="replicate")
+        return torch.cat([mask, ang], dim=1)
+    return mask
+
+
+def _resize_max_hw(x: torch.Tensor, max_hw: Optional[int]) -> torch.Tensor:
+    """
+    把张量的 H/W 按比例缩到 max(H,W) <= max_hw（只缩小，不放大）。
+    """
+    if (max_hw is None) or (max_hw <= 0):
+        return x
+    H, W = x.shape[-2], x.shape[-1]
+    m = max(H, W)
+    if m <= max_hw:
+        return x
+    scale = float(max_hw) / float(m)
+    newH = max(1, int(round(H * scale)))
+    newW = max(1, int(round(W * scale)))
+    return F.interpolate(x, size=(newH, newW), mode="bilinear", align_corners=False)
+
+
+def _natural_key(s: str):
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
+
+
+def _latest_ckpt(ckpt_dir: str, prefix: str) -> Optional[str]:
+    patt = os.path.join(ckpt_dir, f"{prefix}_epoch*.pth")
+    files = glob.glob(patt)
+    if not files:
+        return None
+    files.sort(key=_natural_key)
+    return files[-1]
+
+
+# =============================================================================
+# Perceptual loss (VGG16 features)  —— mask-aware, grayscale->RGB, optional downsample
+# =============================================================================
+
+def _to_vgg_input_from_m1(x_m1: torch.Tensor) -> torch.Tensor:
+    """
+    x_m1: (B,1,H,W) in [-1,1]  -> VGG input (B,3,H,W), ImageNet normalized.
+    """
+    x01 = ((x_m1 + 1.0) * 0.5).clamp(0.0, 1.0)
+    x3 = x01.repeat(1, 3, 1, 1)
+    mean = x3.new_tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std  = x3.new_tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    return (x3 - mean) / std
+
+
+class VGGPerceptualLoss(nn.Module):
+    """
+    VGG16 feature perceptual loss. 默认用 relu1_2, relu2_2, relu3_3（更省显存/更快）。
+    支持 weight_map（B,1,H,W）做空间加权（比如只算 missing 区）。
+    """
+    def __init__(self, layers: Optional[List[int]] = None, use_pretrained: bool = True):
+        super().__init__()
+        try:
+            from torchvision import models
+            from torchvision.models import VGG16_Weights
+        except Exception as e:
+            raise RuntimeError(
+                "Perceptual loss 需要 torchvision。请先安装 torchvision，或关闭 use_percep。"
+            ) from e
+
+        if layers is None:
+            layers = [3, 8, 15]  # relu1_2, relu2_2, relu3_3
+
+        self.layers = list(layers)
+
+        if use_pretrained:
+            vgg = models.vgg16(weights=VGG16_Weights.DEFAULT).features
+        else:
+            vgg = models.vgg16(weights=None).features
+
+        for p in vgg.parameters():
+            p.requires_grad = False
+        vgg.eval()
+        self.vgg = vgg
+
+    def _extract_feats(self, x_vgg: torch.Tensor) -> List[torch.Tensor]:
+        feats = []
+        h = x_vgg
+        for i, layer in enumerate(self.vgg):
+            h = layer(h)
+            if i in self.layers:
+                feats.append(h)
+        return feats
+
+    def forward(
+        self,
+        pred_m1: torch.Tensor,
+        tgt_m1: torch.Tensor,
+        weight_map: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        pred_m1/tgt_m1: (B,1,H,W) in [-1,1]
+        weight_map: (B,1,H,W) in [0,1] or any positive weights
+        """
+        pred_vgg = _to_vgg_input_from_m1(pred_m1.float())
+        tgt_vgg  = _to_vgg_input_from_m1(tgt_m1.float())
+
+        pred_feats = self._extract_feats(pred_vgg)
+        with torch.no_grad():
+            tgt_feats = self._extract_feats(tgt_vgg)
+
+        loss = pred_vgg.new_tensor(0.0)
+        eps = 1e-6
+
+        for fp, ft in zip(pred_feats, tgt_feats):
+            if weight_map is None:
+                loss = loss + F.l1_loss(fp, ft)
+            else:
+                wm = F.interpolate(weight_map.float(), size=fp.shape[-2:], mode="bilinear", align_corners=False)
+                wm = wm.clamp_min(0.0)
+                wm = wm.expand(-1, fp.shape[1], -1, -1)
+                diff = (fp - ft).abs()
+                loss = loss + (diff * wm).sum() / wm.sum().clamp_min(eps)
+
+        return loss
+
+
 class I2SBLocalTrainer:
-    def __init__(self,
-                 device: str = "cuda",
-                 lr: float = 3e-4,
-                 epochs: int = 150,
-                 sigma_T: float = 1.0,
-                 t0: float = 1e-4,
-                 ema_decay: float = 0.999,
-                 ckpt_dir: str = "checkpoints/i2sb_local",
-                 ckpt_prefix: str = "i2sb_local",
-                 save_every: int = 1,
-                 max_keep: int = 5,
-                 log_dir: str = "logs/i2sb_local",
-                 cond_has_angle: bool = True,
-                 val_metric: str = "loss",
-                 maximize_metric: Optional[bool] = None,
-                 sched: Optional[Dict[str, Any]] = None,
-                 dump_preview_every: int = 0,
-                 log_interval: int = 100,
-                 ):
+    def __init__(
+        self,
+        device: str = "cuda",
+        lr: float = 3e-4,
+        epochs: int = 150,
+        sigma_T: float = 1.0,
+        t0: float = 1e-4,
+        ema_decay: float = 0.999,
+        ckpt_dir: str = "checkpoints/i2sb_local",
+        ckpt_prefix: str = "i2sb_local",
+        save_every: int = 1,
+        max_keep: int = 5,
+        log_dir: str = "logs/i2sb_local",
+        cond_has_angle: bool = True,
+        val_metric: str = "loss",
+        maximize_metric: Optional[bool] = None,
+        sched: Optional[Dict[str, Any]] = None,
+        dump_preview_every: int = 0,
+        log_interval: int = 100,
+        # --- outpainting 权重 ---
+        w_valid: float = 1.0,
+        w_missing: float = 5.0,
+        # --- perceptual loss ---
+        use_percep: bool = False,
+        w_percep: float = 0.02,
+        percep_layers: Optional[List[int]] = None,
+        percep_use_pretrained: bool = True,
+        percep_region: str = "missing",   # "missing" | "both" | "valid"
+        percep_max_hw: int = 256,         # perceptual 分支最大边降采样
+
+        # --- val speed control ---
+        eval_every: int = 1,              # 每 N 个 epoch 才跑一次 val（1=每个 epoch）
+        val_max_batches: int = 0,         # val 最多跑 N 个 batch（0=全量）
+
+        # --- resume ---
+        resume: str = "auto",             # "auto" | "none"
+        resume_from: Optional[str] = None,
+        strict_load: bool = True,
+    ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.lr = float(lr)
         self.epochs = int(epochs)
@@ -145,10 +305,28 @@ class I2SBLocalTrainer:
         self.ema_decay = float(ema_decay)
         self.cond_has_angle = bool(cond_has_angle)
 
+        # weighted pixel loss
+        self.w_valid = float(w_valid)
+        self.w_missing = float(w_missing)
+
+        # perceptual
+        self.use_percep = bool(use_percep)
+        self.w_percep = float(w_percep)
+        self.percep_region = str(percep_region).lower().strip()
+        self.percep_max_hw = int(percep_max_hw) if percep_max_hw is not None else 0
+        self.percep = None
+        if self.use_percep:
+            self.percep = VGGPerceptualLoss(
+                layers=percep_layers,
+                use_pretrained=bool(percep_use_pretrained),
+            ).to(self.device)
+            self.percep.eval()
+
         self.ckpt_dir = ckpt_dir
         self.ckpt_prefix = ckpt_prefix
         self.save_every = int(save_every)
         self.max_keep = int(max_keep)
+        self.log_dir = log_dir
         os.makedirs(self.ckpt_dir, exist_ok=True)
 
         self.log_csv_dir = os.path.join("logs", "logplots", ckpt_prefix)
@@ -169,76 +347,129 @@ class I2SBLocalTrainer:
         self.dump_preview_every = int(dump_preview_every)
         self.log_interval = int(log_interval)
 
+        # val control
+        self.eval_every = max(1, int(eval_every) if eval_every is not None else 1)
+        self.val_max_batches = int(val_max_batches) if val_max_batches is not None else 0
+
+        # resume control
+        self.resume = str(resume or "auto").lower().strip()
+        self.resume_from = resume_from
+        self.strict_load = bool(strict_load)
+
+        # states
         self._recent_ckpts = []
         self.best_epoch: Optional[int] = None
         self._init_best_score()
+        self.start_epoch = 1
+        self.global_step = 0
 
     def _init_best_score(self):
-        if self.maximize_metric:
-            self.best_score = -float("inf")
-        else:
-            self.best_score = float("inf")
+        self.best_score = -float("inf") if self.maximize_metric else float("inf")
 
-    # --------- [修改] I2SB 训练 Loss (Multi-step Random t) ---------
+    @staticmethod
+    def _as_float_or_blank(v):
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            if v.strip() == "":
+                return ""
+            try:
+                return float(v)
+            except Exception:
+                return ""
+        try:
+            return float(v)
+        except Exception:
+            return ""
+
+    # --------- I2SB 训练 Loss (Random t bridge) ---------
     def _step_loss(self, model: nn.Module, batch) -> torch.Tensor:
-        x0 = batch["gt"].to(self.device).float()      # (B,1,H,W) Clean
-        x1 = batch["inp"].to(self.device).float()     # (B,C,H,W) Noisy Stack [img, mask, angle...]
+        """
+        Bridge training (I2SB-style):
+        - x0: GT clean projection in [0,1]
+        - x1_img: degraded/truncated/noisy projection in [0,1]
+        - conds: mask(+angle) in [0,1]  (mask: 1=valid center, 0=missing sides)
+        - xt = (1-t)*x0 + t*x1 + sigma_T*sqrt(t(1-t))*eps
+        - net input: [xt, x1_img, conds, t_map]
+        """
+        x0 = batch["gt"].to(self.device).float()      # (B,1,H,W) in [0,1]
+        x1 = batch["inp"].to(self.device).float()     # (B,C,H,W) in [0,1], C=2 or 3 (noisy,mask,(angle))
         B, C, H, W = x1.shape
 
-        # 归一化到 [-1, 1]
-        x0 = x0 * 2.0 - 1.0
-        x1 = x1 * 2.0 - 1.0
+        x1_img = x1[:, 0:1, ...]     # (B,1,H,W)
+        conds  = x1[:, 1:,  ...]     # (B,C-1,H,W) -> mask(+angle)
 
-        # --- 1. Pad ---
-        n_down = len(getattr(model, "downs", []))
+        # images -> [-1,1]
+        x0_m1  = x0 * 2.0 - 1.0
+        x1m_m1 = x1_img * 2.0 - 1.0
+
+        # pad to UNet factor
+        m = getattr(model, "module", model)
+        n_down = len(getattr(m, "downs", []))
         factor = 2 ** max(n_down, 0)
         Ht = ((H + factor - 1) // factor) * factor
         Wt = ((W + factor - 1) // factor) * factor
 
         if (Ht, Wt) != (H, W):
             pad = (0, Wt - W, 0, Ht - H)
-            x0 = F.pad(x0, pad, mode="reflect")
-            x1 = F.pad(x1, pad, mode="reflect")
+            x0_m1  = F.pad(x0_m1,  pad, mode="reflect")
+            x1m_m1 = F.pad(x1m_m1, pad, mode="reflect")
+            conds  = _pad_conds(conds, pad, has_angle=self.cond_has_angle)
 
-        # --- 2. 准备 I2SB 条件 ---
-        # 拆分: x1_img 是要加噪的图像, conditions (mask/angle) 保持不变
-        x1_img = x1[:, 0:1, ...] 
-        conditions = x1[:, 1:, ...]
+        # sample t and build bridge xt
+        t = torch.rand(B, 1, 1, 1, device=self.device) * (1.0 - self.t0) + self.t0
+        noise = torch.randn_like(x0_m1)
+        std = self.sigma_T * torch.sqrt(t * (1.0 - t))
+        xt = (1.0 - t) * x0_m1 + t * x1m_m1 + std * noise
 
-        # --- 3. 随机采样 t ~ [t0, 1] ---
-        # shape: (B, 1, 1, 1) 方便广播
-        t = torch.rand(B, 1, 1, 1, device=self.device) * (1 - self.t0) + self.t0
-        
-        # --- 4. 构建 xt (Forward Process) ---
-        # I2SB: xt = (1-t)x0 + t*x1 + noise
-        noise = torch.randn_like(x0)
-        # std = sqrt(t(1-t))，这是 I2SB 常用的一种 bridge 设定
-        std = torch.sqrt(t * (1 - t))
-        xt = (1 - t) * x0 + t * x1_img + std * noise
-
-        # --- 5. 构造网络输入 ---
-        # t_map 扩展到全图
+        # net input
         t_map = t.expand(B, 1, Ht, Wt)
-        
-        # 现在的 input 是: [xt, mask, angle, t_map]
-        # 注意：我们将 xt 放回原 x1_img 的位置，这样通道数依然是 4
-        net_in = torch.cat([xt, conditions, t_map], dim=1)
+        net_in = torch.cat([xt, x1m_m1, conds, t_map], dim=1)
 
-        # --- 6. 预测 & Loss ---
-        # 目标：预测 x0
+        # forward: predict x0 in [-1,1]
         x0_hat = model(net_in)
 
-        # 裁回
-        if (H, W) != (Ht, Wt):
-            # 注意: 如果只求 Loss，不一定要裁回去，只要 x0 也保留 padded 状态即可
-            # 但为了逻辑一致，我们通常只计算有效区域
+        # crop back
+        if (Ht, Wt) != (H, W):
             x0_hat = x0_hat[..., :H, :W]
-            x0_orig = x0[..., :H, :W] # 取未 pad 之前的 x0 值(已norm)
+            x0_ref = x0_m1[..., :H, :W]
+            conds_crop = conds[..., :H, :W]
         else:
-            x0_orig = x0
+            x0_ref = x0_m1
+            conds_crop = conds
 
-        # L2 Loss
-        loss = torch.mean((x0_hat - x0_orig) ** 2)
+        # mask: 1=valid(center), 0=missing(sides)
+        mask = conds_crop[:, 0:1, ...].clamp(0.0, 1.0)
+        missing = (1.0 - mask).clamp(0.0, 1.0)
+
+        # ---------------- pixel loss (weighted MSE) ----------------
+        weights = self.w_valid * mask + self.w_missing * missing
+        diff2 = (x0_hat - x0_ref) ** 2
+        loss_pix = (diff2 * weights).sum() / weights.sum().clamp_min(1e-6)
+
+        # ---------------- perceptual loss (optional) ----------------
+        loss = loss_pix
+        if self.use_percep and (self.percep is not None) and (self.w_percep > 0):
+            if self.percep_region == "missing":
+                wmap = missing
+            elif self.percep_region == "valid":
+                wmap = mask
+            else:
+                wmap = weights
+
+            # perceptual 分支降采样（只缩小，不放大）
+            x0_hat_p = _resize_max_hw(x0_hat, self.percep_max_hw)
+            x0_ref_p = _resize_max_hw(x0_ref, self.percep_max_hw)
+            wmap_p   = _resize_max_hw(wmap,   self.percep_max_hw)
+
+            if self.device.type == "cuda":
+                with torch.cuda.amp.autocast(enabled=False):
+                    loss_perc = self.percep(x0_hat_p, x0_ref_p, weight_map=wmap_p)
+            else:
+                loss_perc = self.percep(x0_hat_p, x0_ref_p, weight_map=wmap_p)
+
+            loss = loss + self.w_percep * loss_perc
+
         return loss
 
     def _log_row(self, epoch, step, lr, loss, val_loss, psnr, ssim):
@@ -247,19 +478,60 @@ class I2SBLocalTrainer:
             w.writerow([
                 int(epoch),
                 int(step),
-                float(lr) if lr is not None else "",
-                float(loss) if loss is not None else "",
-                float(val_loss) if val_loss is not None else "",
-                float(psnr) if psnr is not None else "",
-                float(ssim) if ssim is not None else "",
+                self._as_float_or_blank(lr),
+                self._as_float_or_blank(loss),
+                self._as_float_or_blank(val_loss),
+                self._as_float_or_blank(psnr),
+                self._as_float_or_blank(ssim),
             ])
 
-    def _save_ckpt(self, model: nn.Module, epoch: int, tag: Optional[str] = None):
-        obj = {"state_dict": model.state_dict(), "epoch": epoch}
+    def _save_ckpt(
+        self,
+        model: nn.Module,
+        epoch: int,
+        tag: Optional[str] = None,
+        opt: Optional[optim.Optimizer] = None,
+        sched: Optional[optim.lr_scheduler._LRScheduler] = None,
+        scaler: Optional[torch.cuda.amp.GradScaler] = None,
+    ):
+        """
+        新版 ckpt：包含 model/epoch + optimizer/scheduler/scaler/ema/global_step/best
+        兼容旧版：只存 state_dict/epoch 的 ckpt 也能 load。
+        """
+        payload = {
+            "epoch": int(epoch),
+            "state_dict": model.state_dict(),
+            "global_step": int(getattr(self, "global_step", 0)),
+            "best_score": float(getattr(self, "best_score", 0.0)),
+            "best_epoch": getattr(self, "best_epoch", None),
+        }
+
+        if opt is not None:
+            payload["optimizer"] = opt.state_dict()
+        if sched is not None:
+            try:
+                payload["scheduler"] = sched.state_dict()
+            except Exception:
+                pass
+        if scaler is not None:
+            try:
+                payload["scaler"] = scaler.state_dict()
+            except Exception:
+                pass
+
+        # EMA shadow
+        if hasattr(self, "ema") and self.ema is not None:
+            try:
+                payload["ema_decay"] = float(self.ema.decay)
+                payload["ema_shadow"] = {k: v.detach().cpu() for k, v in self.ema.shadow.items()}
+            except Exception:
+                pass
+
         name = f"{self.ckpt_prefix}_{'epoch'+str(epoch) if tag is None else tag}.pth"
         path = os.path.join(self.ckpt_dir, name)
-        torch.save(obj, path)
+        torch.save(payload, path)
         print(f"[CKPT] save -> {path}", flush=True)
+
         if tag is None:
             self._recent_ckpts.append(path)
 
@@ -272,63 +544,190 @@ class I2SBLocalTrainer:
             except Exception:
                 pass
 
-    # --------- 验证 (保持 One-step t=1.0 逻辑用于快速监控) ---------
+    def _try_resume(
+        self,
+        model: nn.Module,
+        opt: optim.Optimizer,
+        sched: Optional[optim.lr_scheduler._LRScheduler],
+        scaler: Optional[torch.cuda.amp.GradScaler],
+    ) -> int:
+        """
+        返回 start_epoch（续训从 last_epoch+1 开始）
+        resume:
+          - "none": 禁用
+          - "auto": 自动找最新 prefix_epoch*.pth
+        resume_from:
+          - 指定 ckpt 路径（优先级最高）
+        """
+        if self.resume in ("none", "false", "0"):
+            print("[RESUME] disabled (resume=none).", flush=True)
+            return 1
+
+        ckpt_path = None
+        if self.resume_from:
+            ckpt_path = self.resume_from
+        elif self.resume == "auto":
+            ckpt_path = _latest_ckpt(self.ckpt_dir, self.ckpt_prefix)
+
+        if (not ckpt_path) or (not os.path.isfile(ckpt_path)):
+            print("[RESUME] no checkpoint found; start from scratch.", flush=True)
+            return 1
+
+        print(f"[RESUME] loading: {ckpt_path}", flush=True)
+        ckpt = torch.load(ckpt_path, map_location=self.device)
+
+        # 兼容：可能直接就是 state_dict
+        state = ckpt.get("state_dict", ckpt)
+        model.load_state_dict(state, strict=self.strict_load)
+
+        # optimizer
+        if ("optimizer" in ckpt) and (opt is not None):
+            try:
+                opt.load_state_dict(ckpt["optimizer"])
+                print("[RESUME] optimizer restored.", flush=True)
+            except Exception as e:
+                print(f"[RESUME] optimizer restore failed: {e}", flush=True)
+
+        # scheduler
+        if ("scheduler" in ckpt) and (sched is not None):
+            try:
+                sched.load_state_dict(ckpt["scheduler"])
+                print("[RESUME] scheduler restored.", flush=True)
+            except Exception as e:
+                print(f"[RESUME] scheduler restore failed: {e}", flush=True)
+
+        # scaler
+        if ("scaler" in ckpt) and (scaler is not None):
+            try:
+                scaler.load_state_dict(ckpt["scaler"])
+                print("[RESUME] scaler restored.", flush=True)
+            except Exception as e:
+                print(f"[RESUME] scaler restore failed: {e}", flush=True)
+
+        # global_step / best
+        try:
+            self.global_step = int(ckpt.get("global_step", 0))
+        except Exception:
+            self.global_step = 0
+
+        if "best_score" in ckpt:
+            try:
+                self.best_score = float(ckpt["best_score"])
+            except Exception:
+                pass
+        if "best_epoch" in ckpt:
+            self.best_epoch = ckpt.get("best_epoch", None)
+
+        # EMA shadow
+        if hasattr(self, "ema") and self.ema is not None and ("ema_shadow" in ckpt):
+            try:
+                shadow = ckpt["ema_shadow"]
+                for k, v in shadow.items():
+                    if k in self.ema.shadow:
+                        self.ema.shadow[k].copy_(v.to(self.ema.shadow[k].device))
+                print("[RESUME] EMA shadow restored.", flush=True)
+            except Exception as e:
+                print(f"[RESUME] EMA shadow restore failed: {e}", flush=True)
+
+        last_epoch = int(ckpt.get("epoch", 0))
+        start_epoch = last_epoch + 1 if last_epoch > 0 else 1
+        print(f"[RESUME] resumed at epoch {last_epoch} -> start from {start_epoch} | global_step={self.global_step}", flush=True)
+        return start_epoch
+
+    # --------- 验证 (one-step t=1.0 for monitoring) ---------
     @torch.no_grad()
-    def _eval_val(self, model: nn.Module, val_loader) -> Dict[str, float]:
+    def _eval_val(self, model: nn.Module, val_loader, max_batches: int = 0) -> Dict[str, float]:
         if val_loader is None:
             return {"val_loss": None, "psnr": None, "ssim": None}
+
         model.eval()
         self.ema.apply_shadow(model)
-        s_loss, s_psnr, s_ssim, n = 0.0, 0.0, 0.0, 0
 
+        s_loss, s_psnr, s_ssim, n = 0.0, 0.0, 0.0, 0
+        metric_missing_only = True
+
+        m = getattr(model, "module", model)
+        n_down = len(getattr(m, "downs", []))
+        factor = 2 ** max(n_down, 0)
+
+        bcount = 0
         for batch in val_loader:
-            # Loss 依然调用 step_loss (随机 t)，但这只为了监控 loss 下降趋势
-            # 如果想看确定的 loss，可以临时 mock t=1，但这里保持原样简单
+            bcount += 1
+            if (max_batches is not None) and (max_batches > 0) and (bcount > max_batches):
+                break
+
+            # val loss uses the same _step_loss (includes perceptual if enabled)
             loss = self._step_loss(model, batch).item()
             s_loss += loss
 
-            # PSNR/SSIM 计算：这里我们模拟 "One-step Inference at t=1.0"
-            # 也就是把 Noisy 直接喂进去，看模型能不能直接恢复 (One-step consistency)
-            x0 = batch["gt"].to(self.device).float()       # [0,1]
-            x1 = batch["inp"].to(self.device).float()      # [0,1]
-            B, _, H, W = x1.shape
+            # one-step inference at t=1
+            x0 = batch["gt"].to(self.device).float()
+            x1 = batch["inp"].to(self.device).float()
+            B, C, H, W = x1.shape
 
-            t_map = torch.ones((B, 1, H, W), device=self.device, dtype=torch.float32)
-            x1m1 = x1 * 2.0 - 1.0
+            x1_img = x1[:, 0:1, ...]
+            conds = x1[:, 1:, ...]  # mask(+angle)
+            x1m_m1 = x1_img * 2.0 - 1.0
 
-            n_down = len(getattr(model, "downs", []))
-            factor = 2 ** max(n_down, 0)
             Ht = _ceil_to(H, factor)
             Wt = _ceil_to(W, factor)
+            t_map = torch.ones((B, 1, H, W), device=self.device, dtype=torch.float32)
+
             if (Ht, Wt) != (H, W):
                 pad = (0, Wt - W, 0, Ht - H)
-                x1m1 = F.pad(x1m1, pad, mode="reflect")
+                x1m_m1 = F.pad(x1m_m1, pad, mode="reflect")
                 t_map = F.pad(t_map, pad, mode="reflect")
+                conds = _pad_conds(conds, pad, has_angle=self.cond_has_angle)
 
-            # 这里直接喂 x1 (相当于 t=1, xt=x1)，看 One-step 效果
-            xin = torch.cat([x1m1, t_map], dim=1)
+            xt = x1m_m1
+            xin = torch.cat([xt, x1m_m1, conds, t_map], dim=1)
             pred = model(xin)
+
             if pred.shape[-2:] != (Ht, Wt):
                 pred = F.interpolate(pred, size=(Ht, Wt), mode="bilinear", align_corners=False)
-            if (H, W) != (Ht, Wt):
+            if (Ht, Wt) != (H, W):
                 pred = pred[..., :H, :W]
+                conds_crop = conds[..., :H, :W]
+            else:
+                conds_crop = conds
 
             pred01 = ((pred.clamp(-1, 1) + 1.0) * 0.5).detach()
             gt01 = x0.detach()
 
-            for i in range(pred01.shape[0]):
-                s_psnr += float(psnr_fn(pred01[i, 0].cpu().numpy(), gt01[i, 0].cpu().numpy()))
-                s_ssim += float(ssim_fn(pred01[i, 0].cpu().numpy(), gt01[i, 0].cpu().numpy()))
+            if metric_missing_only:
+                mask = conds_crop[:, 0:1, ...].clamp(0.0, 1.0)
+                miss = (1.0 - mask).clamp(0.0, 1.0)
+
+            for i in range(B):
+                p = pred01[i, 0].cpu().numpy()
+                g = gt01[i, 0].cpu().numpy()
+
+                if metric_missing_only:
+                    mm = miss[i, 0].cpu().numpy().astype("float32")
+                    if mm.mean() > 1e-6:
+                        p_use = p * mm
+                        g_use = g * mm
+                    else:
+                        p_use, g_use = p, g
+                else:
+                    p_use, g_use = p, g
+
+                s_psnr += float(psnr_fn(p_use, g_use))
+                s_ssim += float(ssim_fn(p_use, g_use))
                 n += 1
 
         self.ema.restore(model)
-        if n == 0:
-            return {"val_loss": s_loss, "psnr": None, "ssim": None}
-        return {"val_loss": s_loss / max(1, len(val_loader)),
-                "psnr": s_psnr / n,
-                "ssim": s_ssim / n}
 
-    # --------- 预览图导出 (同理保持 One-step) ---------
+        if n == 0:
+            return {"val_loss": (s_loss / max(1, bcount)), "psnr": None, "ssim": None}
+
+        return {
+            "val_loss": s_loss / max(1, bcount),
+            "psnr": s_psnr / n,
+            "ssim": s_ssim / n,
+        }
+
+    # --------- 预览图导出 (one-step) ---------
     @torch.no_grad()
     def _dump_preview(self, model: nn.Module, data_loader, epoch: int):
         if self.dump_preview_every <= 0 or data_loader is None:
@@ -345,45 +744,51 @@ class I2SBLocalTrainer:
             self.ema.restore(model)
             return
 
-        x0 = batch["gt"].to(self.device).float()   
-        x1 = batch["inp"].to(self.device).float()  
-        B, _, H, W = x1.shape
+        x0 = batch["gt"].to(self.device).float()
+        x1 = batch["inp"].to(self.device).float()
+        B, C, H, W = x1.shape
+
+        x1_img = x1[:, 0:1, ...]
+        conds = x1[:, 1:, ...]
+        x1m_m1 = x1_img * 2.0 - 1.0
+
+        m = getattr(model, "module", model)
+        n_down = len(getattr(m, "downs", []))
+        factor = 2 ** max(n_down, 0)
 
         with _autocast_ctx(enabled=(self.device.type == "cuda"), device_type="cuda"):
-            # Preview 依然使用 t=1.0 展示 "单步去噪" 能力
             t_map = torch.ones((B, 1, H, W), device=self.device, dtype=torch.float32)
-            x1m1 = x1 * 2.0 - 1.0
-
-            n_down = len(getattr(model, "downs", []))
-            factor = 2 ** max(n_down, 0)
             Ht = ((H + factor - 1) // factor) * factor
             Wt = ((W + factor - 1) // factor) * factor
+
             if (Ht, Wt) != (H, W):
                 pad = (0, Wt - W, 0, Ht - H)
-                x1m1 = F.pad(x1m1, pad, mode="reflect")
+                x1m_m1 = F.pad(x1m_m1, pad, mode="reflect")
                 t_map = F.pad(t_map, pad, mode="reflect")
+                conds = _pad_conds(conds, pad, has_angle=self.cond_has_angle)
 
-            xin = torch.cat([x1m1, t_map], dim=1)
+            xt = x1m_m1
+            xin = torch.cat([xt, x1m_m1, conds, t_map], dim=1)
+
             pred = model(xin)
             if pred.shape[-2:] != (Ht, Wt):
                 pred = F.interpolate(pred, size=(Ht, Wt), mode="bilinear", align_corners=False)
-            if (H, W) != (Ht, Wt):
+            if (Ht, Wt) != (H, W):
                 pred = pred[..., :H, :W]
 
             pred01 = ((pred.clamp(-1, 1) + 1.0) * 0.5).detach().cpu()
-            gt01   = x0.detach().cpu()
-            noisy01= x1[:, 0:1].detach().cpu() if x1.shape[1] >= 1 else gt01
+            gt01 = x0.detach().cpu()
+            noisy01 = x1_img.detach().cpu()
 
-            hH, hW = pred01.shape[-2], pred01.shape[-1]
-            gH, gW = gt01.shape[-2],   gt01.shape[-1]
-            nH, nW = noisy01.shape[-2],noisy01.shape[-1]
-            Hm, Wm = min(hH, gH, nH), min(hW, gW, nW)
+            Hm = min(pred01.shape[-2], gt01.shape[-2], noisy01.shape[-2])
+            Wm = min(pred01.shape[-1], gt01.shape[-1], noisy01.shape[-1])
+
             p = pred01[0, 0, :Hm, :Wm].numpy()
             g = gt01[0, 0, :Hm, :Wm].numpy()
-            n = noisy01[0, 0, :Hm, :Wm].numpy()
+            nimg = noisy01[0, 0, :Hm, :Wm].numpy()
 
             out_path = os.path.join(self.ckpt_dir, f"preview_epoch{epoch:03d}.png")
-            _save_triptych(n, p, g, out_path, title=f"epoch={epoch}")
+            _save_triptych(nimg, p, g, out_path, title=f"epoch={epoch}")
 
         self.ema.restore(model)
 
@@ -391,6 +796,8 @@ class I2SBLocalTrainer:
         from tqdm import tqdm
 
         model.to(self.device).train()
+
+        # init EMA/opt/sched/scaler
         self.ema = EMA(model, decay=self.ema_decay)
         opt = optim.AdamW(model.parameters(), lr=self.lr)
 
@@ -409,18 +816,29 @@ class I2SBLocalTrainer:
         scaler = _create_grad_scaler(enabled=use_amp)
 
         n_batches = len(train_loader)
-        global_step = 0
 
+        # init states (then try resume to overwrite)
+        if not hasattr(self, "global_step"):
+            self.global_step = 0
         self._init_best_score()
         self.best_epoch = None
 
+        # resume
+        self.start_epoch = self._try_resume(model, opt, sched, scaler)
+        start_epoch = int(self.start_epoch) if self.start_epoch is not None else 1
+        start_epoch = max(1, start_epoch)
+
         disable_tqdm = not sys.stdout.isatty()
 
-        for epoch in range(1, self.epochs + 1):
+        for epoch in range(start_epoch, self.epochs + 1):
             running = 0.0
-            pbar = tqdm(train_loader, total=n_batches,
-                        desc=f"Epoch {epoch}/{self.epochs}",
-                        ncols=100, disable=disable_tqdm)
+            pbar = tqdm(
+                train_loader,
+                total=n_batches,
+                desc=f"Epoch {epoch}/{self.epochs}",
+                ncols=100,
+                disable=disable_tqdm
+            )
 
             for it, batch in enumerate(pbar, 1):
                 opt.zero_grad(set_to_none=True)
@@ -433,7 +851,8 @@ class I2SBLocalTrainer:
                 self.ema.update(model)
 
                 running += loss.item()
-                global_step += 1
+                self.global_step += 1
+
                 lr_now = opt.param_groups[0]["lr"]
                 avg = running / it
 
@@ -446,23 +865,35 @@ class I2SBLocalTrainer:
             if sched is not None:
                 sched.step()
 
-            val_res = self._eval_val(model, val_loader) if val_loader is not None else {"val_loss": None, "psnr": None, "ssim": None}
-            val_loss, vpsnr, vssim = val_res["val_loss"], val_res["psnr"], val_res["ssim"]
-
             epoch_avg = running / max(1, n_batches)
-
             print(f"Epoch {epoch} mean loss: {epoch_avg:.4f} | lr={opt.param_groups[0]['lr']:.8e}", flush=True)
-            if val_loss is not None:
+
+            # ---- val control: only run every eval_every epochs ----
+            do_val = (val_loader is not None) and (self.eval_every > 0) and ((epoch % self.eval_every) == 0)
+
+            if do_val:
+                val_res = self._eval_val(model, val_loader, max_batches=self.val_max_batches)
+                val_loss, vpsnr, vssim = val_res["val_loss"], val_res["psnr"], val_res["ssim"]
                 psnr_str = f"{vpsnr:.3f} dB" if vpsnr is not None else "NA"
-                ssim_str = f"{vssim:.4f}"    if vssim is not None else "NA"
+                ssim_str = f"{vssim:.4f}" if vssim is not None else "NA"
                 print(f"[VAL {epoch}] loss={val_loss:.6f}  PSNR={psnr_str}  SSIM={ssim_str}", flush=True)
+            else:
+                val_loss, vpsnr, vssim = None, None, None
+                if val_loader is not None:
+                    print(f"[VAL {epoch}] skipped (eval_every={self.eval_every})", flush=True)
 
-            self._log_row(epoch=epoch, step=global_step, lr=opt.param_groups[0]["lr"],
-                          loss=epoch_avg,
-                          val_loss=(val_loss if val_loss is not None else ""),
-                          psnr=(vpsnr if vpsnr is not None else ""),
-                          ssim=(vssim if vssim is not None else ""))
+            # log csv
+            self._log_row(
+                epoch=epoch,
+                step=self.global_step,
+                lr=opt.param_groups[0]["lr"],
+                loss=epoch_avg,
+                val_loss=val_loss,
+                psnr=vpsnr,
+                ssim=vssim,
+            )
 
+            # best selection only when val exists
             score = None
             if self.val_metric == "loss" and val_loss is not None:
                 score = (-val_loss) if self.maximize_metric else val_loss
@@ -479,22 +910,22 @@ class I2SBLocalTrainer:
                     is_better = True
 
             if is_better:
-                self._save_ckpt(model, epoch, tag="best")
+                self._save_ckpt(model, epoch, tag="best", opt=opt, sched=sched, scaler=scaler)
 
-            if self.val_metric == "loss" and val_loss is not None:
+            if self.val_metric == "loss" and (val_loss is not None) and (self.best_epoch is not None):
                 best_disp = (-self.best_score) if self.maximize_metric else self.best_score
-                be = self.best_epoch if self.best_epoch is not None else epoch
-                print(f"[BEST] metric={best_disp:.4f} @ epoch {be}", flush=True)
-            elif self.val_metric in ("psnr", "ssim") and (vpsnr is not None or vssim is not None):
+                print(f"[BEST] metric={best_disp:.4f} @ epoch {self.best_epoch}", flush=True)
+            elif self.val_metric in ("psnr", "ssim") and (self.best_epoch is not None) and (vpsnr is not None or vssim is not None):
                 best_disp = (self.best_score if self.maximize_metric else -self.best_score)
-                be = self.best_epoch if self.best_epoch is not None else epoch
-                print(f"[BEST] metric={best_disp:.4f} @ epoch {be}", flush=True)
+                print(f"[BEST] metric={best_disp:.4f} @ epoch {self.best_epoch}", flush=True)
 
+            # preview (independent frequency)
             self._dump_preview(model, val_loader if val_loader is not None else train_loader, epoch)
 
+            # save periodic ckpt
             if (epoch % self.save_every) == 0:
-                self._save_ckpt(model, epoch)
+                self._save_ckpt(model, epoch, opt=opt, sched=sched, scaler=scaler)
                 self._prune_ckpt()
 
             if epoch == self.epochs:
-                self._save_ckpt(model, epoch, tag="last")
+                self._save_ckpt(model, epoch, tag="last", opt=opt, sched=sched, scaler=scaler)
