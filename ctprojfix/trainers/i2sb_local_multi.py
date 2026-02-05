@@ -1,5 +1,5 @@
 # ctprojfix/trainers/i2sb_local_multi.py
-# multi step I2SB trainer (random-t bridge training, one-step val/preview)
+# multi step I2SB trainer (random-t bridge training, multi-step sampling val/preview)
 # -*- coding: utf-8 -*-
 import os, csv, sys
 import glob, re
@@ -89,42 +89,45 @@ def _ceil_to(v: int, m: int) -> int:
     return ((v + m - 1) // m) * m if m > 0 else v
 
 
-def _percentile_norm01(a, p_lo=1.0, p_hi=99.0):
-    import numpy as np
-    a = a.astype("float32")
-    lo, hi = np.percentile(a, [p_lo, p_hi])
-    if hi <= lo:
-        lo, hi = float(a.min()), float(a.max() + 1e-6)
-    return ((a - lo) / (hi - lo + 1e-6)).clip(0, 1).astype("float32")
+def _natural_key(s: str):
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
 
 
-def _save_triptych(noisy01, pred01, gt01, out_path, title=None):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+def _latest_ckpt(ckpt_dir: str, prefix: str) -> Optional[str]:
+    patt = os.path.join(ckpt_dir, f"{prefix}_epoch*.pth")
+    files = glob.glob(patt)
+    if not files:
+        return None
+    files.sort(key=_natural_key)
+    return files[-1]
 
-    n = _percentile_norm01(noisy01)
-    p = _percentile_norm01(pred01)
-    g = _percentile_norm01(gt01)
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    axes[0].imshow(n, cmap="gray"); axes[0].set_title("Noisy"); axes[0].axis("off")
-    axes[1].imshow(p, cmap="gray"); axes[1].set_title("Pred");  axes[1].axis("off")
-    axes[2].imshow(g, cmap="gray"); axes[2].set_title("GT");    axes[2].axis("off")
-    if title:
-        fig.suptitle(title)
-    plt.tight_layout()
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"[PREVIEW] {out_path}")
+def _tag_ckpt(ckpt_dir: str, prefix: str, tag: str) -> Optional[str]:
+    p = os.path.join(ckpt_dir, f"{prefix}_{tag}.pth")
+    return p if os.path.isfile(p) else None
+
+
+def _auto_resume_ckpt(ckpt_dir: str, prefix: str) -> Optional[str]:
+    """
+    auto resume 优先级：
+      1) prefix_last.pth  （你跑完 epochs 后保存的 last）
+      2) prefix_best.pth
+      3) prefix_epoch*.pth 最新的一个
+    """
+    p = _tag_ckpt(ckpt_dir, prefix, "last")
+    if p:
+        return p
+    p = _tag_ckpt(ckpt_dir, prefix, "best")
+    if p:
+        return p
+    return _latest_ckpt(ckpt_dir, prefix)
 
 
 def _pad_conds(mask_and_maybe_angle: torch.Tensor, pad, has_angle: bool) -> torch.Tensor:
     """
     conds: [mask, (angle)] in [0,1]
     - mask pad: constant 0  (pad 区必须视为 missing)
-    - angle pad: replicate (更合理：边缘延拓)
+    - angle pad: replicate (边缘延拓)
     """
     if mask_and_maybe_angle is None:
         return None
@@ -157,23 +160,63 @@ def _resize_max_hw(x: torch.Tensor, max_hw: Optional[int]) -> torch.Tensor:
     return F.interpolate(x, size=(newH, newW), mode="bilinear", align_corners=False)
 
 
-def _natural_key(s: str):
-    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
+# ---------------- preview utils ----------------
+def _percentile_lohi(a, p_lo=1.0, p_hi=99.0):
+    import numpy as np
+    a = a.astype("float32")
+    lo, hi = np.percentile(a, [p_lo, p_hi])
+    if hi <= lo:
+        lo, hi = float(a.min()), float(a.max() + 1e-6)
+    return float(lo), float(hi)
 
 
-def _latest_ckpt(ckpt_dir: str, prefix: str) -> Optional[str]:
-    patt = os.path.join(ckpt_dir, f"{prefix}_epoch*.pth")
-    files = glob.glob(patt)
-    if not files:
-        return None
-    files.sort(key=_natural_key)
-    return files[-1]
+def _norm01_with_lohi(a, lo, hi):
+    import numpy as np
+    a = a.astype("float32")
+    return ((a - lo) / (hi - lo + 1e-6)).clip(0, 1).astype("float32")
+
+
+def _save_quad_preview(noisy01, pred01, gt01, out_path, title=None):
+    """
+    4-panel: Noisy / Pred / GT / |Pred-GT| + colorbar
+    使用 GT 的 percentile 强度范围统一归一化（避免每张图单独拉伸导致“看起来变差/变好”的错觉）
+    """
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    lo, hi = _percentile_lohi(gt01, 1.0, 99.0)
+
+    n = _norm01_with_lohi(noisy01, lo, hi)
+    p = _norm01_with_lohi(pred01,  lo, hi)
+    g = _norm01_with_lohi(gt01,    lo, hi)
+
+    diff = np.abs(p - g).astype("float32")
+    # diff 上限用自身 99% 分位，避免色条被极端点拉爆
+    d_lo, d_hi = _percentile_lohi(diff, 0.0, 99.0)
+    d_hi = max(d_hi, 1e-6)
+
+    fig, axes = plt.subplots(1, 4, figsize=(14, 4))
+    axes[0].imshow(n, cmap="gray", vmin=0, vmax=1); axes[0].set_title("Noisy"); axes[0].axis("off")
+    axes[1].imshow(p, cmap="gray", vmin=0, vmax=1); axes[1].set_title("Pred");  axes[1].axis("off")
+    axes[2].imshow(g, cmap="gray", vmin=0, vmax=1); axes[2].set_title("GT");    axes[2].axis("off")
+    im = axes[3].imshow(diff, cmap="magma", vmin=0, vmax=d_hi); axes[3].set_title("|Pred-GT|"); axes[3].axis("off")
+    cbar = fig.colorbar(im, ax=axes[3], fraction=0.046, pad=0.04)
+    cbar.ax.tick_params(labelsize=8)
+
+    if title:
+        fig.suptitle(title)
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[PREVIEW] {out_path}")
 
 
 # =============================================================================
 # Perceptual loss (VGG16 features)  —— mask-aware, grayscale->RGB, optional downsample
 # =============================================================================
-
 def _to_vgg_input_from_m1(x_m1: torch.Tensor) -> torch.Tensor:
     """
     x_m1: (B,1,H,W) in [-1,1]  -> VGG input (B,3,H,W), ImageNet normalized.
@@ -196,9 +239,7 @@ class VGGPerceptualLoss(nn.Module):
             from torchvision import models
             from torchvision.models import VGG16_Weights
         except Exception as e:
-            raise RuntimeError(
-                "Perceptual loss 需要 torchvision。请先安装 torchvision，或关闭 use_percep。"
-            ) from e
+            raise RuntimeError("Perceptual loss 需要 torchvision。请先安装 torchvision，或关闭 use_percep。") from e
 
         if layers is None:
             layers = [3, 8, 15]  # relu1_2, relu2_2, relu3_3
@@ -293,9 +334,15 @@ class I2SBLocalTrainer:
         val_max_batches: int = 0,         # val 最多跑 N 个 batch（0=全量）
 
         # --- resume ---
-        resume: str = "auto",             # "auto" | "none"
+        resume: str = "auto",             # "auto" | "none" | "last" | "best"
         resume_from: Optional[str] = None,
         strict_load: bool = True,
+
+        # --- inference / sampling (I2SB bridge sampler) ---
+        val_infer: str = "one_step",      # "one_step" | "sample"
+        sample_steps: int = 16,           # 采样步数（越大越慢）
+        sample_stochastic: bool = False,  # True=随机采样（可多样性），False=确定性（更稳定）
+        sample_clamp_known: bool = True,  # True=每步强制 valid 区域等于 x1（outpainting）
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.lr = float(lr)
@@ -339,6 +386,7 @@ class I2SBLocalTrainer:
 
         self.val_metric = str(val_metric or "loss").lower()
         if maximize_metric is None:
+            # loss 越小越好；psnr/ssim 越大越好
             self.maximize_metric = (self.val_metric != "loss")
         else:
             self.maximize_metric = bool(maximize_metric)
@@ -354,7 +402,15 @@ class I2SBLocalTrainer:
         # resume control
         self.resume = str(resume or "auto").lower().strip()
         self.resume_from = resume_from
+        # strict_load=True 表示 load_state_dict 必须严格匹配所有 key（层名/形状）
+        # 改网络结构/DP<->单卡切换导致 key 不一致时，strict=True 会直接报错
         self.strict_load = bool(strict_load)
+
+        # inference / sampling control
+        self.val_infer = str(val_infer or "one_step").lower().strip()
+        self.sample_steps = max(1, int(sample_steps))
+        self.sample_stochastic = bool(sample_stochastic)
+        self.sample_clamp_known = bool(sample_clamp_known)
 
         # states
         self._recent_ckpts = []
@@ -382,10 +438,15 @@ class I2SBLocalTrainer:
         except Exception:
             return ""
 
+    def _unet_factor(self, model: nn.Module) -> int:
+        m = getattr(model, "module", model)
+        n_down = len(getattr(m, "downs", []))
+        return 2 ** max(int(n_down), 0)
+
     # --------- I2SB 训练 Loss (Random t bridge) ---------
     def _step_loss(self, model: nn.Module, batch) -> torch.Tensor:
         """
-        Bridge training (I2SB-style):
+        Bridge training (I2SB-style), network predicts x0 in [-1,1]
         - x0: GT clean projection in [0,1]
         - x1_img: degraded/truncated/noisy projection in [0,1]
         - conds: mask(+angle) in [0,1]  (mask: 1=valid center, 0=missing sides)
@@ -404,11 +465,9 @@ class I2SBLocalTrainer:
         x1m_m1 = x1_img * 2.0 - 1.0
 
         # pad to UNet factor
-        m = getattr(model, "module", model)
-        n_down = len(getattr(m, "downs", []))
-        factor = 2 ** max(n_down, 0)
-        Ht = ((H + factor - 1) // factor) * factor
-        Wt = ((W + factor - 1) // factor) * factor
+        factor = self._unet_factor(model)
+        Ht = _ceil_to(H, factor)
+        Wt = _ceil_to(W, factor)
 
         if (Ht, Wt) != (H, W):
             pad = (0, Wt - W, 0, Ht - H)
@@ -462,6 +521,7 @@ class I2SBLocalTrainer:
             x0_ref_p = _resize_max_hw(x0_ref, self.percep_max_hw)
             wmap_p   = _resize_max_hw(wmap,   self.percep_max_hw)
 
+            # perceptual 用 FP32 更稳（禁用 autocast）
             if self.device.type == "cuda":
                 with torch.cuda.amp.autocast(enabled=False):
                     loss_perc = self.percep(x0_hat_p, x0_ref_p, weight_map=wmap_p)
@@ -555,9 +615,14 @@ class I2SBLocalTrainer:
         返回 start_epoch（续训从 last_epoch+1 开始）
         resume:
           - "none": 禁用
-          - "auto": 自动找最新 prefix_epoch*.pth
+          - "auto": 自动（优先 last -> best -> latest epoch）
+          - "last": 强制读 last
+          - "best": 强制读 best
         resume_from:
           - 指定 ckpt 路径（优先级最高）
+        strict_load:
+          - True: 严格匹配 key（结构/DP前缀不一致会报错）
+          - False: 允许缺 key/多 key（只要 shape 能对上）
         """
         if self.resume in ("none", "false", "0"):
             print("[RESUME] disabled (resume=none).", flush=True)
@@ -566,8 +631,13 @@ class I2SBLocalTrainer:
         ckpt_path = None
         if self.resume_from:
             ckpt_path = self.resume_from
-        elif self.resume == "auto":
-            ckpt_path = _latest_ckpt(self.ckpt_dir, self.ckpt_prefix)
+        else:
+            if self.resume == "last":
+                ckpt_path = _tag_ckpt(self.ckpt_dir, self.ckpt_prefix, "last")
+            elif self.resume == "best":
+                ckpt_path = _tag_ckpt(self.ckpt_dir, self.ckpt_prefix, "best")
+            else:
+                ckpt_path = _auto_resume_ckpt(self.ckpt_dir, self.ckpt_prefix)
 
         if (not ckpt_path) or (not os.path.isfile(ckpt_path)):
             print("[RESUME] no checkpoint found; start from scratch.", flush=True)
@@ -634,7 +704,115 @@ class I2SBLocalTrainer:
         print(f"[RESUME] resumed at epoch {last_epoch} -> start from {start_epoch} | global_step={self.global_step}", flush=True)
         return start_epoch
 
-    # --------- 验证 (one-step t=1.0 for monitoring) ---------
+    # ---------------------------------------------------------------------
+    # I2SB multi-step sampling (bridge sampler), network predicts x0_hat
+    # ---------------------------------------------------------------------
+    @torch.no_grad()
+    def _i2sb_sample(
+        self,
+        model: nn.Module,
+        x1_img01: torch.Tensor,   # (B,1,H,W) in [0,1]
+        conds01: torch.Tensor,    # (B,Cc,H,W) in [0,1] (mask(+angle))
+        steps: Optional[int] = None,
+        stochastic: Optional[bool] = None,
+        clamp_known: Optional[bool] = None,
+    ) -> torch.Tensor:
+        """
+        Bridge sampling (t=1 -> 0), consistent with your training where net predicts x0.
+
+        State model (same as training forward bridge):
+          x_t = (1-t)*x0 + t*x1 + sigma_T*sqrt(t(1-t))*eps
+
+        We do backward generation by iterating t_k -> t_{k+1} (decreasing).
+        At each step we:
+          1) predict x0_hat = f_theta(x_t, x1, cond, t)
+          2) sample x_s from conditional of the Brownian bridge given x_t and x0_hat.
+
+        clamp_known=True: 每一步强制 valid(mask=1) 区域等于 x1（outpainting 推荐）
+        stochastic=True: 引入随机性（同一输入可多样输出）；False 更稳定、用于 val/论文更好
+        """
+        steps = int(self.sample_steps if steps is None else steps)
+        steps = max(1, steps)
+        stochastic = self.sample_stochastic if stochastic is None else bool(stochastic)
+        clamp_known = self.sample_clamp_known if clamp_known is None else bool(clamp_known)
+
+        B, _, H, W = x1_img01.shape
+        device = self.device
+        use_amp = (device.type == "cuda")
+
+        # [0,1] -> [-1,1]
+        x1m = x1_img01.to(device).float() * 2.0 - 1.0
+        conds = conds01.to(device).float()
+
+        # pad to UNet factor
+        factor = self._unet_factor(model)
+        Ht = _ceil_to(H, factor)
+        Wt = _ceil_to(W, factor)
+        if (Ht, Wt) != (H, W):
+            pad = (0, Wt - W, 0, Ht - H)
+            x1m = F.pad(x1m, pad, mode="reflect")
+            conds = _pad_conds(conds, pad, has_angle=self.cond_has_angle)
+
+        mask = conds[:, 0:1, ...].clamp(0.0, 1.0)
+        eps = 1e-6
+        sigma2 = float(self.sigma_T) ** 2
+
+        # time grid 1 -> 0
+        ts = torch.linspace(1.0, 0.0, steps + 1, device=device, dtype=torch.float32)
+
+        # init at t=1: x = x1
+        x = x1m
+
+        for k in range(steps):
+            t = float(ts[k].item())
+            s = float(ts[k + 1].item())
+
+            t_map = x.new_full((B, 1, Ht, Wt), fill_value=t)
+            net_in = torch.cat([x, x1m, conds, t_map], dim=1)
+
+            with _autocast_ctx(enabled=use_amp, device_type="cuda"):
+                x0_hat = model(net_in)
+
+            # last step: directly output x0_hat
+            if s <= 0.0:
+                x = x0_hat
+            else:
+                # bridge mean at time t/s given x0_hat
+                mt = (1.0 - t) * x0_hat + t * x1m
+                ms = (1.0 - s) * x0_hat + s * x1m
+                r = x - mt
+
+                if t >= 1.0 - 1e-8:
+                    # at t=1, mt == x1, and x==x1 so r≈0; conditional reduces to marginal at s
+                    mean = ms
+                    var_t = x.new_tensor(sigma2) * (x.new_tensor(s) * (1.0 - x.new_tensor(s)))
+                else:
+                    t_t = x.new_tensor(t).clamp_min(eps)
+                    s_t = x.new_tensor(s).clamp_min(0.0)
+                    one_minus_t = (1.0 - t_t).clamp_min(eps)
+
+                    mean = ms + (s_t / t_t) * r
+                    var_t = x.new_tensor(sigma2) * (
+                        s_t * (1.0 - s_t)
+                        - (s_t * (1.0 - t_t)) ** 2 / (t_t * one_minus_t + eps)
+                    )
+
+                if stochastic:
+                    std = torch.sqrt(torch.clamp(var_t, min=0.0))
+                    x = mean + std * torch.randn_like(x)
+                else:
+                    x = mean
+
+            if clamp_known:
+                x = mask * x1m + (1.0 - mask) * x
+
+        # crop back
+        if (Ht, Wt) != (H, W):
+            x = x[..., :H, :W]
+
+        return x.clamp(-1.0, 1.0)
+
+    # --------- 验证：one-step 或 multi-step sampling ---------
     @torch.no_grad()
     def _eval_val(self, model: nn.Module, val_loader, max_batches: int = 0) -> Dict[str, float]:
         if val_loader is None:
@@ -646,9 +824,7 @@ class I2SBLocalTrainer:
         s_loss, s_psnr, s_ssim, n = 0.0, 0.0, 0.0, 0
         metric_missing_only = True
 
-        m = getattr(model, "module", model)
-        n_down = len(getattr(m, "downs", []))
-        factor = 2 ** max(n_down, 0)
+        factor = self._unet_factor(model)
 
         bcount = 0
         for batch in val_loader:
@@ -656,46 +832,61 @@ class I2SBLocalTrainer:
             if (max_batches is not None) and (max_batches > 0) and (bcount > max_batches):
                 break
 
-            # val loss uses the same _step_loss (includes perceptual if enabled)
+            # val loss uses the same _step_loss (random t; includes perceptual if enabled)
             loss = self._step_loss(model, batch).item()
             s_loss += loss
 
-            # one-step inference at t=1
-            x0 = batch["gt"].to(self.device).float()
-            x1 = batch["inp"].to(self.device).float()
+            x0 = batch["gt"].to(self.device).float()    # [0,1]
+            x1 = batch["inp"].to(self.device).float()   # [0,1]
             B, C, H, W = x1.shape
 
-            x1_img = x1[:, 0:1, ...]
-            conds = x1[:, 1:, ...]  # mask(+angle)
+            x1_img = x1[:, 0:1, ...]       # [0,1]
+            conds = x1[:, 1:, ...]         # [0,1]
             x1m_m1 = x1_img * 2.0 - 1.0
 
-            Ht = _ceil_to(H, factor)
-            Wt = _ceil_to(W, factor)
-            t_map = torch.ones((B, 1, H, W), device=self.device, dtype=torch.float32)
-
-            if (Ht, Wt) != (H, W):
-                pad = (0, Wt - W, 0, Ht - H)
-                x1m_m1 = F.pad(x1m_m1, pad, mode="reflect")
-                t_map = F.pad(t_map, pad, mode="reflect")
-                conds = _pad_conds(conds, pad, has_angle=self.cond_has_angle)
-
-            xt = x1m_m1
-            xin = torch.cat([xt, x1m_m1, conds, t_map], dim=1)
-            pred = model(xin)
-
-            if pred.shape[-2:] != (Ht, Wt):
-                pred = F.interpolate(pred, size=(Ht, Wt), mode="bilinear", align_corners=False)
-            if (Ht, Wt) != (H, W):
-                pred = pred[..., :H, :W]
-                conds_crop = conds[..., :H, :W]
+            # inference for metrics
+            if self.val_infer == "sample":
+                pred_m1 = self._i2sb_sample(
+                    model,
+                    x1_img01=x1_img,
+                    conds01=conds,
+                    steps=self.sample_steps,
+                    stochastic=self.sample_stochastic,
+                    clamp_known=self.sample_clamp_known,
+                )
+                conds_for_metric = conds  # 原始 H/W
             else:
-                conds_crop = conds
+                # one-step at t=1
+                Ht = _ceil_to(H, factor)
+                Wt = _ceil_to(W, factor)
+                t_map = torch.ones((B, 1, H, W), device=self.device, dtype=torch.float32)
 
-            pred01 = ((pred.clamp(-1, 1) + 1.0) * 0.5).detach()
+                if (Ht, Wt) != (H, W):
+                    pad = (0, Wt - W, 0, Ht - H)
+                    x1m_pad = F.pad(x1m_m1, pad, mode="reflect")
+                    t_map = F.pad(t_map, pad, mode="reflect")
+                    conds_pad = _pad_conds(conds, pad, has_angle=self.cond_has_angle)
+                else:
+                    x1m_pad = x1m_m1
+                    conds_pad = conds
+
+                xt = x1m_pad
+                xin = torch.cat([xt, x1m_pad, conds_pad, t_map], dim=1)
+                pred_m1 = model(xin)
+
+                if pred_m1.shape[-2:] != (Ht, Wt):
+                    pred_m1 = F.interpolate(pred_m1, size=(Ht, Wt), mode="bilinear", align_corners=False)
+                if (Ht, Wt) != (H, W):
+                    pred_m1 = pred_m1[..., :H, :W]
+                    conds_for_metric = conds_pad[..., :H, :W]
+                else:
+                    conds_for_metric = conds_pad
+
+            pred01 = ((pred_m1.clamp(-1, 1) + 1.0) * 0.5).detach()
             gt01 = x0.detach()
 
             if metric_missing_only:
-                mask = conds_crop[:, 0:1, ...].clamp(0.0, 1.0)
+                mask = conds_for_metric[:, 0:1, ...].clamp(0.0, 1.0)
                 miss = (1.0 - mask).clamp(0.0, 1.0)
 
             for i in range(B):
@@ -727,7 +918,7 @@ class I2SBLocalTrainer:
             "ssim": s_ssim / n,
         }
 
-    # --------- 预览图导出 (one-step) ---------
+    # --------- 预览图导出：one-step 或 multi-step sampling ---------
     @torch.no_grad()
     def _dump_preview(self, model: nn.Module, data_loader, epoch: int):
         if self.dump_preview_every <= 0 or data_loader is None:
@@ -748,47 +939,58 @@ class I2SBLocalTrainer:
         x1 = batch["inp"].to(self.device).float()
         B, C, H, W = x1.shape
 
-        x1_img = x1[:, 0:1, ...]
-        conds = x1[:, 1:, ...]
-        x1m_m1 = x1_img * 2.0 - 1.0
+        x1_img = x1[:, 0:1, ...]      # [0,1]
+        conds = x1[:, 1:, ...]        # [0,1]
 
-        m = getattr(model, "module", model)
-        n_down = len(getattr(m, "downs", []))
-        factor = 2 ** max(n_down, 0)
+        # infer pred (m1)
+        if self.val_infer == "sample":
+            pred_m1 = self._i2sb_sample(
+                model,
+                x1_img01=x1_img,
+                conds01=conds,
+                steps=self.sample_steps,
+                stochastic=self.sample_stochastic,
+                clamp_known=self.sample_clamp_known,
+            )
+        else:
+            # one-step at t=1
+            x1m_m1 = x1_img * 2.0 - 1.0
+            factor = self._unet_factor(model)
+            Ht = _ceil_to(H, factor)
+            Wt = _ceil_to(W, factor)
 
-        with _autocast_ctx(enabled=(self.device.type == "cuda"), device_type="cuda"):
             t_map = torch.ones((B, 1, H, W), device=self.device, dtype=torch.float32)
-            Ht = ((H + factor - 1) // factor) * factor
-            Wt = ((W + factor - 1) // factor) * factor
-
             if (Ht, Wt) != (H, W):
                 pad = (0, Wt - W, 0, Ht - H)
-                x1m_m1 = F.pad(x1m_m1, pad, mode="reflect")
+                x1m_pad = F.pad(x1m_m1, pad, mode="reflect")
                 t_map = F.pad(t_map, pad, mode="reflect")
-                conds = _pad_conds(conds, pad, has_angle=self.cond_has_angle)
+                conds_pad = _pad_conds(conds, pad, has_angle=self.cond_has_angle)
+            else:
+                x1m_pad = x1m_m1
+                conds_pad = conds
 
-            xt = x1m_m1
-            xin = torch.cat([xt, x1m_m1, conds, t_map], dim=1)
+            xt = x1m_pad
+            xin = torch.cat([xt, x1m_pad, conds_pad, t_map], dim=1)
+            pred_m1 = model(xin)
 
-            pred = model(xin)
-            if pred.shape[-2:] != (Ht, Wt):
-                pred = F.interpolate(pred, size=(Ht, Wt), mode="bilinear", align_corners=False)
+            if pred_m1.shape[-2:] != (Ht, Wt):
+                pred_m1 = F.interpolate(pred_m1, size=(Ht, Wt), mode="bilinear", align_corners=False)
             if (Ht, Wt) != (H, W):
-                pred = pred[..., :H, :W]
+                pred_m1 = pred_m1[..., :H, :W]
 
-            pred01 = ((pred.clamp(-1, 1) + 1.0) * 0.5).detach().cpu()
-            gt01 = x0.detach().cpu()
-            noisy01 = x1_img.detach().cpu()
+        pred01 = ((pred_m1.clamp(-1, 1) + 1.0) * 0.5).detach().cpu()
+        gt01 = x0.detach().cpu()
+        noisy01 = x1_img.detach().cpu()
 
-            Hm = min(pred01.shape[-2], gt01.shape[-2], noisy01.shape[-2])
-            Wm = min(pred01.shape[-1], gt01.shape[-1], noisy01.shape[-1])
+        Hm = min(pred01.shape[-2], gt01.shape[-2], noisy01.shape[-2])
+        Wm = min(pred01.shape[-1], gt01.shape[-1], noisy01.shape[-1])
 
-            p = pred01[0, 0, :Hm, :Wm].numpy()
-            g = gt01[0, 0, :Hm, :Wm].numpy()
-            nimg = noisy01[0, 0, :Hm, :Wm].numpy()
+        p = pred01[0, 0, :Hm, :Wm].numpy()
+        g = gt01[0, 0, :Hm, :Wm].numpy()
+        nimg = noisy01[0, 0, :Hm, :Wm].numpy()
 
-            out_path = os.path.join(self.ckpt_dir, f"preview_epoch{epoch:03d}.png")
-            _save_triptych(nimg, p, g, out_path, title=f"epoch={epoch}")
+        out_path = os.path.join(self.ckpt_dir, f"preview_epoch{epoch:03d}.png")
+        _save_quad_preview(nimg, p, g, out_path, title=f"epoch={epoch} | infer={self.val_infer}")
 
         self.ema.restore(model)
 
@@ -876,7 +1078,7 @@ class I2SBLocalTrainer:
                 val_loss, vpsnr, vssim = val_res["val_loss"], val_res["psnr"], val_res["ssim"]
                 psnr_str = f"{vpsnr:.3f} dB" if vpsnr is not None else "NA"
                 ssim_str = f"{vssim:.4f}" if vssim is not None else "NA"
-                print(f"[VAL {epoch}] loss={val_loss:.6f}  PSNR={psnr_str}  SSIM={ssim_str}", flush=True)
+                print(f"[VAL {epoch}] infer={self.val_infer} loss={val_loss:.6f}  PSNR={psnr_str}  SSIM={ssim_str}", flush=True)
             else:
                 val_loss, vpsnr, vssim = None, None, None
                 if val_loader is not None:
@@ -919,13 +1121,14 @@ class I2SBLocalTrainer:
                 best_disp = (self.best_score if self.maximize_metric else -self.best_score)
                 print(f"[BEST] metric={best_disp:.4f} @ epoch {self.best_epoch}", flush=True)
 
-            # preview (independent frequency)
+            # preview (independent frequency; by default uses val_loader)
             self._dump_preview(model, val_loader if val_loader is not None else train_loader, epoch)
 
-            # save periodic ckpt
+            # save periodic ckpt (epochN)
             if (epoch % self.save_every) == 0:
                 self._save_ckpt(model, epoch, opt=opt, sched=sched, scaler=scaler)
                 self._prune_ckpt()
 
+            # final last
             if epoch == self.epochs:
                 self._save_ckpt(model, epoch, tag="last", opt=opt, sched=sched, scaler=scaler)

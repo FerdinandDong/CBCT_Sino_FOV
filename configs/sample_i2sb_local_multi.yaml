@@ -51,7 +51,7 @@ sample:
   # split: test
   split: temp_test  # 使用临时测试集
   out_dir: outputs/i2sb_local_multi_20step
-  steps: 5
+  steps: 50
   sigma_T: 1.0      # 显式写
   pick_id: 10       # 显式写test10
   pick_angle: 90

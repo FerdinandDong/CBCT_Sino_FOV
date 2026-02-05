@@ -1,64 +1,137 @@
 # configs/train_i2sb_local_multi.yaml
+# Train config aligned with your existing cfg style (same field system as sample_i2sb_local_multi.yaml)
+# For: scripts/i2sb_train.py + ctprojfix/trainers/i2sb_local_multi.py (I2SBLocalTrainer)
 
 model:
-  name: i2sb_local_multi   # 于在 train.py 里触发新逻辑
+  name: i2sb_local_multi
   params:
-    in_ch: 4          # 保持 4 (noisy+mask+angle + t_map)
+    # xt(1) + x1_img(1) + conds(mask+angle=2) + t_map(1) = 5
+    # if add_angle_channel=false then in_ch should be 4
+    in_ch: 5
     base: 64
     depth: 4
+    emb_dim: 256
     dropout: 0.0
 
 data:
-  # 
   use_dummy: false
+
+  # dataset roots (keep consistent with your sample cfg)
   root_noisy: /data/shared_folder/projectionsNoisy
   root_clean: /data/shared_folder/projectionsNoisy
+
+  # optional filters
   ids: []
-  exclude_ids: [0, 10, 11]
+  # exclude_ids: [0, 10, 11]
+  exclude_ids: [0, 11]
+
+  # projection sampling
   step: 1
-  downsample: 2
+  downsample: 8           # 用于快速验证；最终可改回 2/4
   truncate_left: 350
   truncate_right: 350
+
   mask_mode: fixed
   normalize: percentile
   add_angle_channel: true
-  
-  batch_size: 8
-  num_workers: 4
+
+  # dataloader
+  batch_size: 32
+  num_workers: 8
   pin_memory: true
-  cache_strategy: lru
-  max_cached_ids: 2
+  shuffle: false
+  return_norm_stats: true
+  drop_last: true
+
+  # split definition (same as sample cfg)
   split:
     mode: files
     list_format: id
-    train_list: splits/train.txt
-    val_list:   splits/val.txt
+    train_list: splits/debug_train.txt
+    val_list:   splits/debug_val.txt
     test_list:  splits/test.txt
+    # train_list: splits/train.txt
+    # val_list:   splits/val.txt
+    # test_list:  splits/test.txt
+    temp_test_list: splits/temp_test.txt
 
 train:
+  # ---------------- basic ----------------
   device: "cuda:1"
-  epochs: 150
-  lr: 3e-4
-  ema: 0.999
-  
-  # I2SB 参数
-  sigma_T: 1.0
-  t0: 1e-4
+  lr: 3.0e-4
+  epochs: 300
 
-  #路径区分
+  # ---------------- I2SB bridge ----------------
+  sigma_T: 1.0
+  t0: 1.0e-4
+
+  # ---------------- EMA ----------------
+  ema_decay: 0.999
+
+  # ---------------- ckpt/log ----------------
   ckpt_dir: checkpoints/i2sb_local_multi
   ckpt_prefix: i2sb_local_multi
   log_dir: logs/i2sb_local_multi
-  
+
   save_every: 1
   max_keep: 5
-  
+  log_interval: 100
+
+  # 预览图：由 trainer 的 _dump_preview 控制
+  # dump_preview_every=0 关闭；=1 每个epoch出一次 preview_epochXXX.png
+  dump_preview_every: 50
+
+  # ---------------- conditioning ----------------
+  # 保持跟 data.add_angle_channel 一致
+  # scripts/i2sb_train.py 目前是从 data.add_angle_channel  cond_has_angle
+  # cond_has_angle: true
+
+  # ---------------- val ----------------
+  eval_every: 30
+  val_max_batches: 0
+
+  # best selection metric
+  # "loss" / "psnr" / "ssim"
+  val_metric: psnr
+  maximize_metric: true
+
+  # ---------------- scheduler ----------------
+  # null / cosine / step
   sched:
     type: cosine
     T_max: 150
-    eta_min: 1e-6
+    eta_min: 1.0e-6
+    step_size: 50
+    gamma: 0.5
 
-  log_interval: 100
-  val_metric: loss
-  maximize_metric: false
-  dump_preview_every: 0
+  # ---------------- outpainting weights ----------------
+  w_valid: 1.0
+  w_missing: 5.0
+
+  # ---------------- perceptual loss ----------------
+  # 需要 torchvision；不开就不会引入额外依赖
+  use_percep: false
+  w_percep: 0.02
+  percep_layers: [3, 8, 15]
+  percep_use_pretrained: true
+  # "missing" | "valid" | "both"
+  percep_region: missing
+  percep_max_hw: 256
+
+  # ---------------- resume ----------------
+  # auto/none
+  # 当前 trainer 的 auto 逻辑是找 prefix_epoch*.pth（不包含 *_last.pth / *_best.pth）
+  # 默认优先 last”，修改：auto 优先 last->best->epoch*
+  # 写死 last 路径是最稳的方式。
+  resume: auto
+  resume_from: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth
+  # resume_from: null
+  strict_load: true
+
+  # ---------------- inference / sampling for val/preview ----------------
+  # 这些参数需要把它们加进 trainer 的 __init__ 并在 _eval_val/_dump_preview 中使用
+
+  val_infer: sample            # "one_step" | "sample"
+  sample_steps: 5
+  sample_stochastic: false     # 走 ODE 还是走 SDE!!!!!!!!!!!!!!!!!!!!!!!!!!
+  sample_clamp_known: true
