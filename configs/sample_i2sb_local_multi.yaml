@@ -41,7 +41,7 @@ data:
   return_norm_stats: true
 
 train:
-  device: "cuda:1"
+  device: "cuda:2"
   ckpt_dir: checkpoints/i2sb_local_multi
   ckpt_prefix: i2sb_local_multi
 
@@ -49,8 +49,8 @@ sample:
   ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best.pth
   # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best_old.pth
   # split: test
-  split: temp_test  # 使用临时测试集
-  out_dir: outputs/i2sb_local_multi_20step
+  split: test  # 使用临时测试集
+  out_dir: outputs/i2sb_local_multi_temp
   steps: 50
   sigma_T: 1.0      # 显式写
   pick_id: 10       # 显式写test10
@@ -61,3 +61,9 @@ sample:
     enable: true
     format: png
     cmap: magma
+
+  val_infer: sample
+  sample_stochastic: false
+  sample_clamp_known: true
+  metric_missing_only: true
+  

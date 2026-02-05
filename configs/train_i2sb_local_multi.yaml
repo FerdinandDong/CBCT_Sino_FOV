@@ -23,7 +23,7 @@ data:
   # optional filters
   ids: []
   # exclude_ids: [0, 10, 11]
-  exclude_ids: [0, 11]
+  exclude_ids: []
 
   # projection sampling
   step: 1
@@ -59,7 +59,7 @@ train:
   # ---------------- basic ----------------
   device: "cuda:1"
   lr: 3.0e-4
-  epochs: 300
+  epochs: 150
 
   # ---------------- I2SB bridge ----------------
   sigma_T: 1.0
@@ -99,23 +99,23 @@ train:
   # null / cosine / step
   sched:
     type: cosine
-    T_max: 150
+    T_max: 300
     eta_min: 1.0e-6
     step_size: 50
     gamma: 0.5
 
   # ---------------- outpainting weights ----------------
   w_valid: 1.0
-  w_missing: 5.0
+  w_missing: 10.0
 
   # ---------------- perceptual loss ----------------
   # 需要 torchvision；不开就不会引入额外依赖
-  use_percep: false
+  use_percep: true
   w_percep: 0.02
-  percep_layers: [3, 8, 15]
+  percep_layers: [3, 8]
   percep_use_pretrained: true
   # "missing" | "valid" | "both"
-  percep_region: missing
+  percep_region: both
   percep_max_hw: 256
 
   # ---------------- resume ----------------
