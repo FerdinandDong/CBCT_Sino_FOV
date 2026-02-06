@@ -17,7 +17,7 @@ data:
   exclude_ids: []
   step: 1
   # downsample: 2
-  downsample: 2               #########先改成4 用来快速验证 最终会结果看齐2!!!!!!!!!!!!!!!!!
+  downsample: 2               #########先改成8 用来快速验证 最终会结果看齐2!!!!!!!!!!!!!!!!!
   truncate_left: 350
   truncate_right: 350
   mask_mode: fixed
@@ -46,12 +46,14 @@ train:
   ckpt_prefix: i2sb_local_multi
 
 sample:
-  ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_epoch24.pth
+  # ckpt: checkpoints/i2sb_local_multi_ds8/i2sb_local_multi_ds8_last.pth
+  ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_epoch129.pth
   # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best.pth
   # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best_old.pth
   # split: test
   split: temp_test  # 使用临时测试集
   out_dir: outputs/i2sb_local_multi_temp
+  # out_dir: outputs/i2sb_local_multi_ds8both110perc005
   steps: 50
   sigma_T: 1.0      # 显式写
   pick_id: 10       # 显式写test10

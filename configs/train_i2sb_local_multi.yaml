@@ -27,7 +27,7 @@ data:
 
   # projection sampling
   step: 1
-  downsample: 2           # 用于快速验证；最终可改回 2/4
+  downsample: 4           # 用于快速验证；最终可改回 2
   truncate_left: 350
   truncate_right: 350
 
@@ -36,7 +36,7 @@ data:
   add_angle_channel: true
 
   # dataloader
-  batch_size: 8
+  batch_size: 16       # ds8 32    ds2 8
   num_workers: 8
   pin_memory: true
   shuffle: false
@@ -47,19 +47,19 @@ data:
   split:
     mode: files
     list_format: id
-    # train_list: splits/debug_train.txt
-    # val_list:   splits/debug_val.txt
+    train_list: splits/debug_train.txt
+    val_list:   splits/debug_val.txt
     # test_list:  splits/test.txt
-    train_list: splits/train.txt
-    val_list:   splits/val.txt
+    # train_list: splits/train.txt
+    # val_list:   splits/val.txt
     test_list:  splits/test.txt
     temp_test_list: splits/temp_test.txt
 
 train:
   # ---------------- basic ----------------
-  device: "cuda:1"
+  device: "cuda:2" # 前台2 后台1
   lr: 3.0e-4
-  epochs: 150
+  epochs: 200     # 和续训相关
 
   # ---------------- I2SB bridge ----------------
   sigma_T: 1.0
@@ -69,9 +69,15 @@ train:
   ema_decay: 0.999
 
   # ---------------- ckpt/log ----------------
-  ckpt_dir: checkpoints/i2sb_local_multi
-  ckpt_prefix: i2sb_local_multi
-  log_dir: logs/i2sb_local_multi
+  # ckpt_dir: checkpoints/i2sb_local_multi
+  # ckpt_prefix: i2sb_local_multi
+  # log_dir: logs/i2sb_local_multi
+  # ckpt_dir: checkpoints/i2sb_local_multi_ds8
+  # ckpt_prefix: i2sb_local_multi_ds8
+  # log_dir: logs/i2sb_local_multi_ds8
+  ckpt_dir: checkpoints/i2sb_local_multi_ds4
+  ckpt_prefix: i2sb_local_multi_ds4
+  log_dir: logs/i2sb_local_multi_ds4
 
   save_every: 1
   max_keep: 5
@@ -79,7 +85,7 @@ train:
 
   # 预览图：由 trainer 的 _dump_preview 控制
   # dump_preview_every=0 关闭；=1 每个epoch出一次 preview_epochXXX.png
-  dump_preview_every: 50
+  dump_preview_every: 30
 
   # ---------------- conditioning ----------------
   # 保持跟 data.add_angle_channel 一致
@@ -99,7 +105,7 @@ train:
   # null / cosine / step
   sched:
     type: cosine
-    T_max: 300
+    T_max: 200
     eta_min: 1.0e-6
     step_size: 50
     gamma: 0.5
@@ -116,17 +122,41 @@ train:
   percep_use_pretrained: true
   # "missing" | "valid" | "both"
   percep_region: both
-  percep_max_hw: 256
+  percep_max_hw: 384 # 256 384 1024?
 
   # ---------------- resume ----------------
-  # auto/none
   # 当前 trainer 的 auto 逻辑是找 prefix_epoch*.pth（不包含 *_last.pth / *_best.pth）
-  # 默认优先 last”，修改：auto 优先 last->best->epoch*
-  # 写死 last 路径是最稳的方式。
-  resume: auto
-  resume_from: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth
-  # resume_from: null
+  # 写死 last 路径是最稳的方式
+  
+  #从头开始:
+  epochs: 200
+  resume: none
+  resume_from: null
   strict_load: true
+
+  #真续训：从上次中断的 last/best 自动继续
+  # epochs: 150
+  # resume: auto
+  # resume_from: null
+  # resume_from: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth
+  # resume: last
+  # strict_load: true  
+# train:
+#   epochs: 300
+#   sched:
+#     type: cosine
+#     T_max: 300
+  
+  # 伪续训/迁移 warm start：从指定 ckpt 继续训练
+  # epochs: 300
+  # init_from: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth # 只要 init_from 生效，脚本会自动 resume=none 且 从 start_epoch 开始循环
+  # init_strict: true # 是否严格加载（默认 true）
+  # start_epoch: 30
+ 
+  # # 选项: 伪续训要避免覆盖原实验
+  # ckpt_prefix: i2sb_local_multi_ft1
+  # ckpt_dir: checkpoints/i2sb_local_multi_ft1
+  # log_dir: logs/i2sb_local_multi_ft1
 
   # ---------------- inference / sampling for val/preview ----------------
   # 这些参数需要把它们加进 trainer 的 __init__ 并在 _eval_val/_dump_preview 中使用
