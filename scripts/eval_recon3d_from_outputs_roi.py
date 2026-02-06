@@ -489,10 +489,10 @@ def main():
             ang = ang[keep]; A_arr = A_arr[keep]; a_idx = a_idx[keep]
             N = keep.size
 
-    du   = float(recon.get("du", 0.4))
-    dv   = float(recon.get("dv", 0.4))
-    SOD  = float(recon.get("SOD", 750.0))
-    ODD  = float(recon.get("ODD", 450.0))
+    du   = float(recon.get("du", 2.0))
+    dv   = float(recon.get("dv", 2.0))
+    SOD  = float(recon.get("SOD", 600.0))
+    ODD  = float(recon.get("ODD", 900.0))
     vol_shape = [int(x) for x in recon.get("vol_shape", [512,512,512])]
     filt = str(recon.get("filter", "ram-lak"))
     gpu  = int(recon.get("gpu", 0))

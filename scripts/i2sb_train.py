@@ -1,5 +1,17 @@
 # scripts/i2sb_train.py
 # -*- coding: utf-8 -*-
+"""
+I2SB local multi trainer entry.
+
+新增（最小侵入）：
+- --init_from: 仅加载模型权重（state_dict），不恢复 optimizer/scheduler/scaler/EMA/best/global_step
+- --init_strict: init_from 是否 strict load（默认 true）
+- --start_epoch: 伪续训时从多少 epoch 记（默认 151）
+  - 注意：trainer 内部依然会从 start_epoch 开始循环 epoch。
+  - 如果从 151 开始继续训练” 那 epochs 仍然是 cfg.train.epochs（300）；
+    如果只是想 日志从151记但只再训练150个epoch，那 epochs 设为 300（151~300 共150个）。
+"""
+
 import argparse
 import yaml
 import os
@@ -112,6 +124,66 @@ def _put_if_not_none(d: dict, k: str, v):
         d[k] = v
 
 
+def _is_dataparallel(model: torch.nn.Module) -> bool:
+    return isinstance(model, torch.nn.DataParallel)
+
+
+def _strip_module_prefix_if_needed(state: Dict[str, Any], model_is_dp: bool) -> Dict[str, Any]:
+    """
+    仅当「目标模型不是 DP」且「state_dict 带 module.」时，才 strip。
+    - model_is_dp=True：保持 module. 前缀（否则会导致 strict=True 失配）
+    - model_is_dp=False：去掉 module.，便于加载到非 DP 模型
+    """
+    if not isinstance(state, dict) or not state:
+        return state
+    has_module = any(k.startswith("module.") for k in state.keys())
+    if has_module and (not model_is_dp):
+        return {k[len("module."):]: v for k, v in state.items()}
+    return state
+
+
+def _add_module_prefix_if_needed(state: Dict[str, Any], model_is_dp: bool) -> Dict[str, Any]:
+    """
+    仅当「目标模型是 DP」且「state_dict 不带 module.」时，加 module. 前缀。
+    这样 DP/非DP 都能互相 warm start。
+    """
+    if not isinstance(state, dict) or not state:
+        return state
+    has_module = any(k.startswith("module.") for k in state.keys())
+    if (not has_module) and model_is_dp:
+        return {("module." + k): v for k, v in state.items()}
+    return state
+
+
+def _load_weights_only(model: torch.nn.Module, ckpt_path: str, device: torch.device, strict: bool = True):
+    """
+    仅加载模型权重（state_dict），不恢复 optimizer/scheduler/scaler/EMA/best/global_step。
+    兼容：
+      - ckpt 是 dict 且包含 'state_dict'
+      - ckpt 直接就是 state_dict
+      - DP/non-DP 前缀互转（module.）
+    """
+    if (not ckpt_path) or (not os.path.isfile(ckpt_path)):
+        raise FileNotFoundError(f"[INIT] init_from ckpt not found: {ckpt_path}")
+
+    ck = torch.load(ckpt_path, map_location=device)
+    sd = ck.get("state_dict", ck)
+
+    model_is_dp = _is_dataparallel(model)
+    sd = _strip_module_prefix_if_needed(sd, model_is_dp=model_is_dp)
+    sd = _add_module_prefix_if_needed(sd, model_is_dp=model_is_dp)
+
+    missing, unexpected = model.load_state_dict(sd, strict=strict)
+    print(f"[INIT] loaded weights-only from: {ckpt_path} | strict={strict} | model_dp={model_is_dp}")
+
+    if (not strict) and (missing or unexpected):
+        print(f"[INIT] missing_keys={len(missing)} unexpected_keys={len(unexpected)}")
+        if len(missing) > 0:
+            print(f"[INIT]  missing (first 10): {missing[:10]}")
+        if len(unexpected) > 0:
+            print(f"[INIT]  unexpected (first 10): {unexpected[:10]}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cfg", default="configs/train_i2sb_local_multi.yaml")
@@ -136,7 +208,16 @@ def main():
     ap.add_argument("--sample_clamp_known", type=str, default=None, help="true/false（覆盖 cfg.train.sample_clamp_known）")
 
     # metric direction
-    ap.add_argument("--maximize_metric", type=str, default=None, help="true/false（覆盖 cfg.train.maximize_metric；不填则交给 trainer 自动推断）")
+    ap.add_argument("--maximize_metric", type=str, default=None,
+                    help="true/false（覆盖 cfg.train.maximize_metric；不填则交给 trainer 自动推断）")
+
+    # ---------------- NEW: warm start (weights-only) ----------------
+    ap.add_argument("--init_from", type=str, default=None,
+                    help="仅加载模型权重做伪续训/迁移训练（不恢复 optimizer/scheduler/scaler/EMA/best/global_step）")
+    ap.add_argument("--init_strict", type=str, default="true",
+                    help="true/false：init_from 加载是否严格匹配（默认 true）")
+    ap.add_argument("--start_epoch", type=int, default=151,
+                    help="伪续训时从多少 epoch 开始记（默认 151）。会覆盖 trainer 的 start_epoch（但不恢复旧训练状态）")
 
     args = ap.parse_args()
 
@@ -148,8 +229,29 @@ def main():
     # 只考虑 i2sb_local_multi
     if name_lower != "i2sb_local_multi":
         raise RuntimeError(
-            f"[i2sb_train.py] 只支持 model.name=i2sb_local_multi，但你给的是: {model_cfg.get('name')}"
+            f"[i2sb_train.py] 只支持 model.name=i2sb_local_multi，但给的是: {model_cfg.get('name')}"
         )
+
+    # ---------------- unified init_from / init_strict / start_epoch (CLI > CFG) ----------------
+    init_from = args.init_from
+    if init_from is None or str(init_from).strip() == "":
+        init_from = tr.get("init_from", None)
+
+    init_strict = _str2bool(args.init_strict)
+    if init_strict is None:
+        init_strict = _str2bool(tr.get("init_strict", "true"))
+    if init_strict is None:
+        init_strict = True
+
+    start_epoch = args.start_epoch
+    # 若 CLI 没显式改（仍是默认 151），允许 cfg 覆盖
+    if ("start_epoch" in tr) and (args.start_epoch == 151):
+        try:
+            start_epoch = int(tr.get("start_epoch", 151))
+        except Exception:
+            start_epoch = 151
+
+    use_init = (init_from is not None) and (str(init_from).strip() != "")
 
     # device
     device = _resolve_device(tr, args.device, args.gpu)
@@ -200,7 +302,14 @@ def main():
         model_kwargs["emb_dim"] = int(mp["emb_dim"])
 
     model = _instantiate_with_filtered_kwargs(I2SBUNet, **model_kwargs).to(device)
+
+    # 先决定是否 DP，再 wrap；weights-only load 在 wrap 后进行（支持 DP/nonDP key）
     model = _maybe_wrap_dataparallel(model, tr)
+
+    # ---------------- weights-only warm start ----------------
+    if use_init:
+        print(f"[INIT] enabled: init_from={init_from} init_strict={init_strict} start_epoch={start_epoch}")
+        _load_weights_only(model, str(init_from), device, strict=bool(init_strict))
 
     # trainer
     from ctprojfix.trainers.i2sb_local_multi import I2SBLocalTrainer as TrainerCls
@@ -209,6 +318,11 @@ def main():
     # cfg + CLI override
     resume_from = args.resume_from if args.resume_from is not None else tr.get("resume_from", None)
     resume = args.resume if args.resume is not None else tr.get("resume", "auto")
+
+    # 若启用 init_from：强制禁用 trainer resume（避免恢复 optimizer/scheduler/scaler/EMA/best/global_step）
+    if use_init:
+        resume = "none"
+        resume_from = None
 
     strict_cli = _str2bool(args.strict_load)
     strict_load = strict_cli if strict_cli is not None else bool(tr.get("strict_load", True))
@@ -240,7 +354,7 @@ def main():
         ema_raw = tr.get("ema", None)
         ema_decay = float(ema_raw) if isinstance(ema_raw, (int, float)) else 0.999
 
-    # 打印最终生效配置（防止你以为设置生效了但其实没生效）
+    # 打印最终生效配置检查
     print(
         f"[RUN CFG] eval_every={eval_every}  val_max_batches={val_max_batches}  preview_every={preview_every}  "
         f"resume={resume}  resume_from={resume_from}  strict_load={strict_load}  "
@@ -250,6 +364,8 @@ def main():
         f"sample_clamp_known={sample_clamp_known if sample_clamp_known is not None else '(trainer default)'}  "
         f"val_metric={tr.get('val_metric', 'loss')}  maximize_metric={maximize_metric if maximize_metric is not None else '(trainer auto)'}"
     )
+    if use_init:
+        print(f"[RUN CFG] weights-only init_from enabled -> force resume=none | start_epoch={start_epoch}")
 
     trainer_kwargs = dict(
         device=str(device),
@@ -282,7 +398,7 @@ def main():
         eval_every=int(eval_every),
         val_max_batches=int(val_max_batches),
 
-        # resume
+        # resume（若 init_from 启用，这里已被强制 none/None）
         resume_from=resume_from,
         resume=str(resume),
         strict_load=bool(strict_load),
@@ -306,6 +422,15 @@ def main():
     _put_if_not_none(trainer_kwargs, "sample_clamp_known", sample_clamp_known)
 
     trainer = _instantiate_with_filtered_kwargs(TrainerCls, **trainer_kwargs)
+
+    # ---------------- force start_epoch when using init_from ----------------
+    if use_init:
+        # 只影响 epoch 计数与循环起点；不会恢复旧的 optimizer/scheduler 等状态
+        try:
+            trainer.start_epoch = int(start_epoch)
+            print(f"[INIT] set trainer.start_epoch = {trainer.start_epoch}")
+        except Exception as e:
+            print(f"[WARN] set trainer.start_epoch failed: {e}")
 
     # train
     trainer.fit(model, train_loader, val_loader)

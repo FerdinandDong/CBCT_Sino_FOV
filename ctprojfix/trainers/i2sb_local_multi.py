@@ -1026,9 +1026,17 @@ class I2SBLocalTrainer:
         self.best_epoch = None
 
         # resume
-        self.start_epoch = self._try_resume(model, opt, sched, scaler)
-        start_epoch = int(self.start_epoch) if self.start_epoch is not None else 1
-        start_epoch = max(1, start_epoch)
+
+        preset_start = int(getattr(self, "start_epoch", 1) or 1)
+        if self.resume in ("none", "false", "0") and preset_start > 1:
+            # weights-only warm start: 不恢复训练现场，但从 preset_start 开始记 epoch
+            start_epoch = preset_start
+            self.start_epoch = start_epoch
+            print(f"[RESUME] disabled; use preset start_epoch={start_epoch}", flush=True)
+        else:
+            self.start_epoch = self._try_resume(model, opt, sched, scaler)
+            start_epoch = int(self.start_epoch) if self.start_epoch is not None else 1
+            start_epoch = max(1, start_epoch)
 
         disable_tqdm = not sys.stdout.isatty()
 
