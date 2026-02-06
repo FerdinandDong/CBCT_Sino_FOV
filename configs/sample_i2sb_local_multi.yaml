@@ -17,7 +17,7 @@ data:
   exclude_ids: []
   step: 1
   # downsample: 2
-  downsample: 8               #########先改成4 用来快速验证 最终会结果看齐2!!!!!!!!!!!!!!!!!
+  downsample: 2               #########先改成4 用来快速验证 最终会结果看齐2!!!!!!!!!!!!!!!!!
   truncate_left: 350
   truncate_right: 350
   mask_mode: fixed
@@ -25,7 +25,7 @@ data:
   add_angle_channel: true
   
   # 采样时 batch_size 保持小一点，steps 循环会增加计算耗时
-  batch_size: 1
+  batch_size: 2
   num_workers: 2
   pin_memory: true
   
@@ -46,10 +46,11 @@ train:
   ckpt_prefix: i2sb_local_multi
 
 sample:
-  ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best.pth
+  ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_epoch24.pth
+  # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best.pth
   # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best_old.pth
   # split: test
-  split: test  # 使用临时测试集
+  split: temp_test  # 使用临时测试集
   out_dir: outputs/i2sb_local_multi_temp
   steps: 50
   sigma_T: 1.0      # 显式写
@@ -64,6 +65,5 @@ sample:
 
   val_infer: sample
   sample_stochastic: false
-  sample_clamp_known: true
-  metric_missing_only: true
-  
+  sample_clamp_known: false # 强制已知区域不变
+  metric_missing_only: false # 只计算缺失区域

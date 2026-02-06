@@ -27,7 +27,7 @@ data:
 
   # projection sampling
   step: 1
-  downsample: 8           # 用于快速验证；最终可改回 2/4
+  downsample: 2           # 用于快速验证；最终可改回 2/4
   truncate_left: 350
   truncate_right: 350
 
@@ -36,7 +36,7 @@ data:
   add_angle_channel: true
 
   # dataloader
-  batch_size: 32
+  batch_size: 8
   num_workers: 8
   pin_memory: true
   shuffle: false
@@ -47,12 +47,12 @@ data:
   split:
     mode: files
     list_format: id
-    train_list: splits/debug_train.txt
-    val_list:   splits/debug_val.txt
-    test_list:  splits/test.txt
-    # train_list: splits/train.txt
-    # val_list:   splits/val.txt
+    # train_list: splits/debug_train.txt
+    # val_list:   splits/debug_val.txt
     # test_list:  splits/test.txt
+    train_list: splits/train.txt
+    val_list:   splits/val.txt
+    test_list:  splits/test.txt
     temp_test_list: splits/temp_test.txt
 
 train:
@@ -88,7 +88,7 @@ train:
 
   # ---------------- val ----------------
   eval_every: 30
-  val_max_batches: 0
+  val_max_batches: 8
 
   # best selection metric
   # "loss" / "psnr" / "ssim"
@@ -111,7 +111,7 @@ train:
   # ---------------- perceptual loss ----------------
   # 需要 torchvision；不开就不会引入额外依赖
   use_percep: true
-  w_percep: 0.02
+  w_percep: 0.05
   percep_layers: [3, 8]
   percep_use_pretrained: true
   # "missing" | "valid" | "both"
@@ -134,4 +134,4 @@ train:
   val_infer: sample            # "one_step" | "sample"
   sample_steps: 5
   sample_stochastic: false     # 走 ODE 还是走 SDE!!!!!!!!!!!!!!!!!!!!!!!!!!
-  sample_clamp_known: true
+  sample_clamp_known: true     # 强制已知区域不变

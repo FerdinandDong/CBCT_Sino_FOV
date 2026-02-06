@@ -3,6 +3,19 @@
 本项目旨在探索锥束 CT (CBCT) 投影截断 (sino truncation) 与视野扩展 (Field-of-View Extension, FOV) 的学习与重建方法，涵盖了 **Partial Convolution-UNet、扩散模型 (DDPM)** 以及 **基于水模 (WCE) 的传统外推 baseline**。
 
 ---
+
+
+### 数据尺寸说明
+[CHECK] IDs = [0, 5, 6]
+
+===== ID 0 =====
+[NOISY] stats: {"shape": [360, 960, 1240], "dtype": "float32", "min": 0.0, "max": 212.92982482910156, "mean": 37.969940185546875, "std": 56.544044494628906, "p01": 0.0, "p50": 0.09538675099611282, "p99": 203.61912536621094, "zeros": 2687808, "negatives": 0, "sampled": 9523200}
+[NOISY] HU guess: non-HU (likely intensity or log scaled positive)
+[NOISY] if -log(intensity): {"ok": true, "min": -5.360962867736816, "max": 12.723508834838867, "mean": -1.1819137334823608, "std": 3.711803436279297, "p01": -5.33977746963501, "p50": -2.953751564025879, "p99": 5.985898971557617}
+[CLEAN] stats: {"shape": [360, 960, 1240], "dtype": "float32", "min": 0.0, "max": 262.3360900878906, "mean": 42.57258224487305, "std": 55.14096450805664, "p01": 0.3773731291294098, "p50": 4.479748725891113, "p99": 202.84100341796875, "zeros": 26887, "negatives": 0, "sampled": 9523200}
+[CLEAN] HU guess: non-HU (likely intensity or log scaled positive)
+[CLEAN] if -log(intensity): {"ok": true, "min": -5.569626331329346, "max": 9.931133270263672, "mean": -2.3480143547058105, "std": 1.9222686290740967, "p01": -5.3126091957092285, "p50": -1.514025092124939, "p99": 0.8053264617919922}
+
 ### 示例结果可视化
 
 下面展示部分 `img/` 文件夹中的图像，用于帮助理解模型训练与重建效果：
