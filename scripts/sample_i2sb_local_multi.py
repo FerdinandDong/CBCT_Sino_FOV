@@ -436,7 +436,20 @@ def sample_bridge_conditional(
 @torch.no_grad()
 def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
     import yaml  # local import to keep header minimal
+    import random
     cfg = load_cfg(cfg_path)
+
+    # ---------------- SDE相关随机种子! ----------------
+    seed = int((cfg.get("sample", {}) or {}).get("seed", 0))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # # 尽量可复现牺牲速度
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
+    # # ------------------------------------------
 
     # --- device resolution: prefer cfg.train.device; allow cpu fallback ---
     train_cfg = cfg.get("train", {})
@@ -529,6 +542,9 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
     print(f"[RUN] steps={steps} sigma_T={sigma_T} val_infer={val_infer} "
           f"(stochastic={sample_stochastic}, clamp_known={sample_clamp_known}) "
           f"blend_valid={blend_valid} metric_missing_only={metric_missing_only}")
+    print("[CFG RAW] sample_cfg keys =", sorted(list(sample_cfg.keys())))
+    print("[CFG RAW] sample_cfg.sigma_T =", sample_cfg.get("sigma_T", None), "| train_cfg.sigma_T =", train_cfg.get("sigma_T", None))
+
 
     # 4) Inference helpers
     def infer_batch(inp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

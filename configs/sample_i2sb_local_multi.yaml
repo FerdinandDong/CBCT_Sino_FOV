@@ -17,7 +17,7 @@ data:
   exclude_ids: []
   step: 1
   # downsample: 2
-  downsample: 2               #########先改成8 用来快速验证 最终会结果看齐2!!!!!!!!!!!!!!!!!
+  downsample: 4             #########先改成8 4 快速验证 最终会结果看齐2!!!!!!!!!!!!!!!!!
   truncate_left: 350
   truncate_right: 350
   mask_mode: fixed
@@ -46,16 +46,30 @@ train:
   ckpt_prefix: i2sb_local_multi
 
 sample:
+  # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth
+  ckpt: checkpoints/i2sb_local_multi_ds4/i2sb_local_multi_ds4_epoch139.pth
   # ckpt: checkpoints/i2sb_local_multi_ds8/i2sb_local_multi_ds8_last.pth
-  ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_epoch129.pth
+  # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_epoch129.pth
   # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best.pth
   # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best_old.pth
   # split: test
   split: temp_test  # 使用临时测试集
-  out_dir: outputs/i2sb_local_multi_temp
+
+  # out_dir: outputs/i2sb_local_multi
+  # out_dir: outputs/i2sb_local_multi_temp
+  # out_dir: outputs/i2sb_local_multi_ds4_step1
+  # out_dir: outputs/i2sb_local_multi_ds4_step5
+  # out_dir: outputs/i2sb_local_multi_ds4_step10
+  out_dir: outputs/i2sb_local_multi_ds4_step20
+  # out_dir: outputs/i2sb_local_multi_ds4_step50
+  # out_dir: outputs/i2sb_local_multi_ds4_step20_sigmaT66
+  # out_dir: outputs/i2sb_local_multi_ds4_step20_sigmaT33
+  # out_dir: outputs/i2sb_local_multi_ds4_step20_sigmaT100
   # out_dir: outputs/i2sb_local_multi_ds8both110perc005
-  steps: 50
-  sigma_T: 1.0      # 显式写
+  steps: 20   # 采样步数 1 5 10 20 50
+  sigma_T: 1.0    # SDE相关显式写
+  # sigma_T: 0.66   # SDE相关显式写
+  # sigma_T: 0.33   # 显式写
   pick_id: 10       # 显式写test10
   pick_angle: 90
   
@@ -66,6 +80,7 @@ sample:
     cmap: magma
 
   val_infer: sample
-  sample_stochastic: false
+  sample_stochastic: false  # 走 ODE 还是 SDE!测试中间态0.33 0.66 开启 想想随即种子 需要复现实验 正常走ODE质量好
+  seed: 0 # 固定随机种子以复现关于SDE相关实验结果
   sample_clamp_known: false # 强制已知区域不变
   metric_missing_only: false # 只计算缺失区域

@@ -27,7 +27,7 @@ data:
 
   # projection sampling
   step: 1
-  downsample: 4           # 用于快速验证；最终可改回 2
+  downsample: 2           # 用于快速验证；最终可改回 2
   truncate_left: 350
   truncate_right: 350
 
@@ -36,7 +36,7 @@ data:
   add_angle_channel: true
 
   # dataloader
-  batch_size: 16       # ds8 32    ds2 8
+  batch_size: 8       # ds8 32    ds2 8
   num_workers: 8
   pin_memory: true
   shuffle: false
@@ -57,9 +57,9 @@ data:
 
 train:
   # ---------------- basic ----------------
-  device: "cuda:2" # 前台2 后台1
-  lr: 3.0e-4
-  epochs: 200     # 和续训相关
+  device: "cuda:1" # 前台2 后台1
+  lr: 2.0e-4
+  epochs: 150     # 和续训相关
 
   # ---------------- I2SB bridge ----------------
   sigma_T: 1.0
@@ -75,9 +75,9 @@ train:
   # ckpt_dir: checkpoints/i2sb_local_multi_ds8
   # ckpt_prefix: i2sb_local_multi_ds8
   # log_dir: logs/i2sb_local_multi_ds8
-  ckpt_dir: checkpoints/i2sb_local_multi_ds4
-  ckpt_prefix: i2sb_local_multi_ds4
-  log_dir: logs/i2sb_local_multi_ds4
+  # ckpt_dir: checkpoints/i2sb_local_multi_ds4
+  # ckpt_prefix: i2sb_local_multi_ds4
+  # log_dir: logs/i2sb_local_multi_ds4
 
   save_every: 1
   max_keep: 5
@@ -105,7 +105,7 @@ train:
   # null / cosine / step
   sched:
     type: cosine
-    T_max: 200
+    T_max: 150
     eta_min: 1.0e-6
     step_size: 50
     gamma: 0.5
@@ -122,17 +122,17 @@ train:
   percep_use_pretrained: true
   # "missing" | "valid" | "both"
   percep_region: both
-  percep_max_hw: 384 # 256 384 1024?
+  percep_max_hw: 256 # 256 384对于ds4 1024?
 
   # ---------------- resume ----------------
   # 当前 trainer 的 auto 逻辑是找 prefix_epoch*.pth（不包含 *_last.pth / *_best.pth）
   # 写死 last 路径是最稳的方式
   
   #从头开始:
-  epochs: 200
-  resume: none
-  resume_from: null
-  strict_load: true
+  # epochs: 150
+  # resume: none
+  # resume_from: null
+  # strict_load: true
 
   #真续训：从上次中断的 last/best 自动继续
   # epochs: 150
@@ -148,10 +148,10 @@ train:
 #     T_max: 300
   
   # 伪续训/迁移 warm start：从指定 ckpt 继续训练
-  # epochs: 300
-  # init_from: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth # 只要 init_from 生效，脚本会自动 resume=none 且 从 start_epoch 开始循环
-  # init_strict: true # 是否严格加载（默认 true）
-  # start_epoch: 30
+  epochs: 150
+  init_from: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth # 只要 init_from 生效，脚本会自动 resume=none 且 从 start_epoch 开始循环
+  init_strict: true # 是否严格加载（默认 true）
+  start_epoch: 0
  
   # # 选项: 伪续训要避免覆盖原实验
   # ckpt_prefix: i2sb_local_multi_ft1
@@ -164,4 +164,4 @@ train:
   val_infer: sample            # "one_step" | "sample"
   sample_steps: 5
   sample_stochastic: false     # 走 ODE 还是走 SDE!!!!!!!!!!!!!!!!!!!!!!!!!!
-  sample_clamp_known: true     # 强制已知区域不变
+  sample_clamp_known: false    # 强制已知区域不变
