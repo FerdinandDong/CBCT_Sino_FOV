@@ -18,10 +18,11 @@ from collections import defaultdict
 # ================= 配置区域 =================
 
 # 定义 SOTA 方法的文件夹名关键词（它将被单独放在最后）
-SOTA_KEYWORD = "i2sb_local_1step"
+# SOTA_KEYWORD = "i2sb_local_1step"
+SOTA_KEYWORD = "i2sb_local_multi"
 
 ROOT_DIRS = [
-    "outputs/i2sb_local_1step",
+    "outputs/i2sb_local_multi",
     "outputs/pconv_ds2_L2L1_perc_edg_sty_lpips",
     "outputs/pconv_ds2_L2L1_perc_edg_sty",
     "outputs/pconv_ds2_L2L1_perc_edg",

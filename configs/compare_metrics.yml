@@ -1,4 +1,5 @@
 # ================= 全局变量 =================
+root: "outputs/i2sb_local_multi"
 # root: "outputs/i2sb_local_1step"
 # root: "outputs/pconv_ds2_L2L1_perc_edg_sty_lpips"
 # root: "outputs/pconv_ds2_L2L1_perc_edg_sty"
