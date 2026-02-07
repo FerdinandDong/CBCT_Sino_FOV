@@ -58,7 +58,7 @@ def _recursive_format(obj, vars_dict):
     elif isinstance(obj, dict):
         new_dict = {}
         for k, v in obj.items():
-            # [关键升级] 1. 替换 Key 里的变量 (让 yaml 里的 Key 可以动态变化)
+            # 1. 替换 Key 里的变量 (让 yaml 里的 Key 可以动态变化)
             new_k = _recursive_format(k, vars_dict) if isinstance(k, str) else k
             # 2. 替换 Value 里的变量
             new_v = _recursive_format(v, vars_dict)
@@ -199,7 +199,7 @@ class MetricEvaluator:
 # ==============================================================================
 
 def run_task(task, global_vars, evaluator: MetricEvaluator, f_log):
-    # [关键步骤] 递归替换配置中的变量（包括 Key 和 Value）
+    # 递归替换配置中的变量（包括 Key 和 Value）
     task = _recursive_format(task, global_vars)
     
     name = task.get("name", "Task")
@@ -288,7 +288,7 @@ def main():
 
     root = cfg.get("root", ".")
     
-    # [关键升级] 自动从 root 路径提取文件夹名
+    # 自动从 root 路径提取文件夹名
     # e.g., "outputs/i2sb_local_1step" -> "i2sb_local_1step"
     root_name = os.path.basename(root.rstrip("/\\"))
     

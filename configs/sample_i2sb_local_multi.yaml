@@ -17,7 +17,7 @@ data:
   exclude_ids: []
   step: 1
   # downsample: 2
-  downsample: 4             #########先改成8 4 快速验证 最终会结果看齐2!!!!!!!!!!!!!!!!!
+  downsample: 2             #########先改成8 4 快速验证 最终会结果看齐2!!!!!!!!!!!!!!!!!
   truncate_left: 350
   truncate_right: 350
   mask_mode: fixed
@@ -42,12 +42,13 @@ data:
 
 train:
   device: "cuda:2"
-  ckpt_dir: checkpoints/i2sb_local_multi
+  ckpt_dir: checkpoints/i2sb_local_multi_ft1
   ckpt_prefix: i2sb_local_multi
 
 sample:
-  # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth
-  ckpt: checkpoints/i2sb_local_multi_ds4/i2sb_local_multi_ds4_epoch139.pth
+  ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth
+  # ckpt: checkpoints/i2sb_local_multi_ft1/i2sb_local_multi_ft1_epoch3.pth
+  # ckpt: checkpoints/i2sb_local_multi_ds4/i2sb_local_multi_ds4_epoch139.pth
   # ckpt: checkpoints/i2sb_local_multi_ds8/i2sb_local_multi_ds8_last.pth
   # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_epoch129.pth
   # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_best.pth
@@ -55,12 +56,12 @@ sample:
   # split: test
   split: temp_test  # 使用临时测试集
 
-  # out_dir: outputs/i2sb_local_multi
+  out_dir: outputs/i2sb_local_multi
   # out_dir: outputs/i2sb_local_multi_temp
   # out_dir: outputs/i2sb_local_multi_ds4_step1
   # out_dir: outputs/i2sb_local_multi_ds4_step5
   # out_dir: outputs/i2sb_local_multi_ds4_step10
-  out_dir: outputs/i2sb_local_multi_ds4_step20
+  # out_dir: outputs/i2sb_local_multi_ds4_step20
   # out_dir: outputs/i2sb_local_multi_ds4_step50
   # out_dir: outputs/i2sb_local_multi_ds4_step20_sigmaT66
   # out_dir: outputs/i2sb_local_multi_ds4_step20_sigmaT33
@@ -84,3 +85,13 @@ sample:
   seed: 0 # 固定随机种子以复现关于SDE相关实验结果
   sample_clamp_known: false # 强制已知区域不变
   metric_missing_only: false # 只计算缺失区域
+
+  snapshots:
+    enable: true
+    dir: snapshots            # 快照放到 out_dir/snapshots/
+    ts: [0.25, 0.5, 0.75] # 任意 t 列表（可空）
+    include_input: true       # 是否把 t=1 noisy input 也放进条带图
+    include_output: true      # 是否把 t=0 输出放进条带图（一般 true）
+    include_gt: true          # 有 GT 时是否放进去（可选）
+    save_strip: true          # 保存 1xN 拼图
+    save_individual: true     # 也单独保存每个 t 的 png

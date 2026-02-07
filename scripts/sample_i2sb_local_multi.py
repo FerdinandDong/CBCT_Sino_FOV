@@ -7,13 +7,32 @@ Key features (cfg-aligned):
 - Uses cfg.sample.split to pick loader from make_dataloader() dict
 - Loads cfg.sample.ckpt (supports new trainer ckpt dict with "state_dict", and legacy state_dict)
 - Supports two inference modes:
-    (A) Deterministic multi-step "shared-eps" update (fast, close to your original script)
+    (A) Deterministic multi-step "shared-eps" update
     (B) Bridge sampler consistent with trainer._i2sb_sample (supports stochastic + clamp_known)
   Controlled by cfg.sample.val_infer / cfg.sample.sample_* (optional). If not provided, defaults to (A).
 - Supports pick_id / pick_angle / "mid" selection
 - Saves volume tif/npy, metrics.csv, and (optional) quad + tiles
 - Computes PSNR/SSIM on missing-only region by default (cfg.sample.metric_missing_only)
-  (If you want full-frame, set false)
+
+NEW (minimal-intrusion):
+- Optional snapshots (t-trajectory) export under out_dir/<snapshots.dir>/... for ONLY the selected (pick_id + pick_angle) case.
+  Configure:
+    sample:
+      snapshots:
+        enable: true
+        dir: snapshots
+        ts: [0.6667, 0.5, 0.3333]
+        include_input: true
+        include_output: true
+        include_gt: true
+        save_strip: true
+        save_individual: true
+
+FIX (minimal-intrusion, for legacy recon3d pipeline compatibility):
+- Always export noisy_volume.npy and gt_volume.npy (in addition to *.tiff)
+- Export *_volume_raw.(npy/tiff) when norm stats exist
+- pred_raw restore no longer requires gt_i (only needs gt_lo/gt_hi)
+- all-mode also exports pred_volume.(npy/tiff) + (optional) noisy/gt + metrics.csv
 """
 
 import os
@@ -46,7 +65,7 @@ def yaml_safe_load(f):
     import yaml
     return yaml.safe_load(f)
 
-def _ceil_to(v, m): 
+def _ceil_to(v, m):
     return ((v + m - 1) // m) * m if m > 0 else v
 
 def _natural_key(s: str):
@@ -134,9 +153,6 @@ def save_quad_and_tiles(noisy01: np.ndarray,
     Writes:
       outputs/.../figs/{name}.png
       outputs/.../figs/{name}_tiles/*
-    Normalization:
-      - if gt exists and use_gt_percentile_norm: use GT [1,99] percentile as shared scaling
-      - else: clamp [0,1]
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -205,6 +221,68 @@ def save_quad_and_tiles(noisy01: np.ndarray,
                     cmap=cmap, with_cb=with_cb)
     print(f"[TILE] -> {tiles_dir}")
 
+
+# ---------------- NEW: snapshot export ----------------
+
+def save_snapshots(out_dir: str,
+                   subdir: str,
+                   base_name: str,
+                   imgs01: List[np.ndarray],
+                   tags: List[str],
+                   gt01: Optional[np.ndarray] = None,
+                   use_gt_percentile_norm: bool = True,
+                   save_strip: bool = True,
+                   save_individual: bool = True):
+    """
+    Save snapshot images into: out_dir/subdir/base_name/*
+      - strip: .../strip.png
+      - individual: .../{tag}.png
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    root = os.path.join(out_dir, str(subdir))
+    case_dir = os.path.join(root, str(base_name))
+    _ensure_dir(case_dir)
+
+    imgs = [np.asarray(x, dtype=np.float32) for x in imgs01]
+    g0 = np.asarray(gt01, dtype=np.float32) if gt01 is not None else None
+
+    if (g0 is not None) and use_gt_percentile_norm:
+        lo, hi = _percentile_lohi(g0, 1.0, 99.0)
+        imgs = [_norm01_with_lohi(im, lo, hi) for im in imgs]
+    else:
+        imgs = [np.clip(im, 0.0, 1.0) for im in imgs]
+
+    if save_individual:
+        for im, tag in zip(imgs, tags):
+            p = os.path.join(case_dir, f"{tag}.png")
+            fig = plt.figure(figsize=(4, 4), dpi=200)
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.imshow(im, cmap="gray", vmin=0.0, vmax=1.0)
+            ax.axis("off")
+            fig.savefig(p, bbox_inches="tight", pad_inches=0)
+            plt.close(fig)
+
+    if save_strip:
+        n = len(imgs)
+        fig, axes = plt.subplots(1, n, figsize=(4*n, 4))
+        if n == 1:
+            axes = [axes]
+        for ax, im, tag in zip(axes, imgs, tags):
+            ax.imshow(im, cmap="gray", vmin=0.0, vmax=1.0)
+            ax.set_title(tag)
+            ax.axis("off")
+        plt.tight_layout()
+        p = os.path.join(case_dir, "strip.png")
+        plt.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    print(f"[SNAP] saved -> {case_dir}")
+
+# ------------------------------------------------------
+
 def _psnr01(x: np.ndarray, y: np.ndarray, eps: float = 1e-12) -> float:
     x = np.clip(x, 0.0, 1.0).astype(np.float32)
     y = np.clip(y, 0.0, 1.0).astype(np.float32)
@@ -256,6 +334,27 @@ def _unet_factor_from_model(net: torch.nn.Module) -> int:
     n_down = len(getattr(core, "downs", []))
     return 2 ** max(int(n_down), 0)
 
+def _save_stack_both(out_dir: str, stem: str, vol: np.ndarray, imagej: bool = True):
+    """Save <stem>.tiff and <stem>.npy"""
+    vol = np.asarray(vol, dtype=np.float32)
+    tiff.imwrite(os.path.join(out_dir, f"{stem}.tiff"), vol, imagej=imagej)
+    np.save(os.path.join(out_dir, f"{stem}.npy"), vol)
+
+def _try_save_raw_stack(out_dir: str, stem_raw: str, frames_raw: List[Optional[np.ndarray]]):
+    """
+    Save raw stack only if all frames are available (not None).
+    """
+    if len(frames_raw) == 0:
+        return False
+    ok = all(x is not None for x in frames_raw)
+    if not ok:
+        print(f"[WARN] skip saving {stem_raw}: missing raw frames (None exists).")
+        return False
+    vol = np.stack([np.asarray(x, dtype=np.float32) for x in frames_raw], axis=0).astype(np.float32)
+    tiff.imwrite(os.path.join(out_dir, f"{stem_raw}.tiff"), vol, imagej=True)
+    np.save(os.path.join(out_dir, f"{stem_raw}.npy"), vol)
+    return True
+
 
 # -----------------------------------------------------------------------------
 # Samplers
@@ -297,7 +396,6 @@ def sample_multi_step_shared_eps(
     """
     Deterministic multi-step sampling with shared epsilon estimate:
       x_t = (1-t)x0 + t*x1 + sigma_T*sqrt(t(1-t))*eps
-    This is the "DDIM-like" mean-path for bridge; fast and stable.
     """
     device = x1_img_m1.device
     B, _, H, W = x1_img_m1.shape
@@ -315,7 +413,6 @@ def sample_multi_step_shared_eps(
 
         t_map = torch.full((B, 1, Ht, Wt), t, device=device, dtype=torch.float32)
 
-        # net input
         if ap is None:
             net_in = torch.cat([xt, x1p, mp, t_map], dim=1)  # 4ch
         else:
@@ -349,11 +446,15 @@ def sample_bridge_conditional(
     stochastic: bool,
     clamp_known: bool,
     cond_has_angle: bool,
-) -> torch.Tensor:
+    save_ts: Optional[List[float]] = None,       # NEW
+    return_states: bool = False,                 # NEW
+):
     """
-    Bridge sampler consistent with trainer._i2sb_sample():
-      - predict x0_hat in [-1,1]
-      - sample x_s from conditional of Brownian bridge given x_t and x0_hat
+    Bridge sampler consistent with trainer._i2sb_sample().
+
+    NEW:
+      - save_ts: list of t in [0,1] to snapshot (nearest grid point on linspace(1,0,steps+1))
+      - return_states: if True return (x0_hat, saved_dict) where saved_dict maps requested tt -> x_tt
     """
     device = x1_img01.device
     B, _, H, W = x1_img01.shape
@@ -361,14 +462,12 @@ def sample_bridge_conditional(
     x1m = x1_img01.float() * 2.0 - 1.0
     conds = conds01.float()
 
-    # pad to unet factor
     factor = _unet_factor_from_model(net)
     Ht = _ceil_to(H, factor)
     Wt = _ceil_to(W, factor)
     if (Ht, Wt) != (H, W):
         pad = (0, Wt - W, 0, Ht - H)
         x1m = F.pad(x1m, pad, mode="reflect")
-        # mask pad: 0; angle pad: replicate
         mask = conds[:, 0:1, ...]
         mask = F.pad(mask, pad, mode="constant", value=0.0)
         if cond_has_angle and conds.shape[1] > 1:
@@ -385,12 +484,23 @@ def sample_bridge_conditional(
     ts = torch.linspace(1.0, 0.0, steps + 1, device=device, dtype=torch.float32)
     x = x1m  # init at t=1
 
+    saved = {}
+    save_idx = {}
+    if save_ts:
+        ts_cpu = ts.detach().cpu()
+        for tt in save_ts:
+            tt = float(tt)
+            idx = int(torch.argmin(torch.abs(ts_cpu - tt)).item())
+            save_idx[idx] = tt
+        if 0 in save_idx:
+            saved[save_idx[0]] = x.detach().clone()
+
     for k in range(steps):
         t = float(ts[k].item())
         s = float(ts[k + 1].item())
 
         t_map = x.new_full((B, 1, Ht, Wt), fill_value=t)
-        net_in = torch.cat([x, x1m, conds, t_map], dim=1)  # (B, 1+1+Cc+1, Ht, Wt)
+        net_in = torch.cat([x, x1m, conds, t_map], dim=1)
         x0_hat = net(net_in)
 
         if s <= 0.0:
@@ -423,10 +533,18 @@ def sample_bridge_conditional(
         if clamp_known:
             x = mask * x1m + (1.0 - mask) * x
 
+        if save_ts and ((k + 1) in save_idx):
+            saved[save_idx[k + 1]] = x.detach().clone()
+
     if (Ht, Wt) != (H, W):
         x = x[..., :H, :W]
+        if save_ts:
+            saved = {tt: vv[..., :H, :W] for tt, vv in saved.items()}
 
-    return x.clamp(-1.0, 1.0)
+    x = x.clamp(-1.0, 1.0)
+    if return_states:
+        return x, saved
+    return x
 
 
 # -----------------------------------------------------------------------------
@@ -435,23 +553,15 @@ def sample_bridge_conditional(
 
 @torch.no_grad()
 def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
-    import yaml  # local import to keep header minimal
     import random
     cfg = load_cfg(cfg_path)
 
-    # ---------------- SDE相关随机种子! ----------------
     seed = int((cfg.get("sample", {}) or {}).get("seed", 0))
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-    # # 尽量可复现牺牲速度
-    # torch.backends.cudnn.deterministic = True
-    # torch.backends.cudnn.benchmark = False
-    # # ------------------------------------------
-
-    # --- device resolution: prefer cfg.train.device; allow cpu fallback ---
     train_cfg = cfg.get("train", {})
     dev_str = str(train_cfg.get("device", "cuda")).strip().lower()
     if dev_str.startswith("cuda") and not torch.cuda.is_available():
@@ -462,7 +572,8 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
 
     # 1) DataLoader (aligned to sample cfg)
     data_cfg = dict(cfg.get("data", {}))
-    data_cfg["shuffle"] = False  # force
+    data_cfg["shuffle"] = False
+    data_cfg["return_norm_stats"] = True  # FIX: ensure *_lo/hi are returned for raw export
     dl = make_dataloader(data_cfg)
 
     sample_cfg = cfg.get("sample", {}) or {}
@@ -481,7 +592,7 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
         if len(loader.dataset) <= 0:
             raise RuntimeError("[DATA] DataLoader is empty.")
 
-    # 2) Model & Checkpoint (cfg.model.params)
+    # 2) Model & Checkpoint
     model_cfg = cfg.get("model", {}) or {}
     mp = (model_cfg.get("params", {}) or {})
 
@@ -508,7 +619,7 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
         print(f"[WARN] ckpt not found: {ckpt_path} (net output may be random).")
     net.eval()
 
-    # 3) Output & sampling params (aligned to cfg.sample.*)
+    # 3) Output & sampling params
     out_dir = out or str(sample_cfg.get("out_dir", "outputs/i2sb_local_multi")).strip()
     _ensure_dir(out_dir)
 
@@ -521,41 +632,39 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
     save_quad = bool(sample_cfg.get("save_quad", True))
     tiles_cfg = sample_cfg.get("tiles", {}) or {}
 
-    # Optional debug: keep valid region from input x1
     blend_valid = bool(sample_cfg.get("blend_valid", False))
-
-    # Metrics region
     metric_missing_only = bool(sample_cfg.get("metric_missing_only", True))
 
-    # Sampling mode: default to deterministic shared-eps (your original)
-    # If you set sample.val_infer = "sample", then use bridge conditional sampler.
     val_infer = str(sample_cfg.get("val_infer", "shared_eps")).lower().strip()
-    # bridge options (only used when val_infer == "sample")
     sample_stochastic = bool(sample_cfg.get("sample_stochastic", False))
     sample_clamp_known = bool(sample_cfg.get("sample_clamp_known", True))
 
-    # Conditioning
     add_angle_channel = bool((cfg.get("data", {}) or {}).get("add_angle_channel", True))
     cond_has_angle = add_angle_channel
+
+    snap_cfg = sample_cfg.get("snapshots", {}) or {}
+    snap_enable = bool(snap_cfg.get("enable", False))
+    snap_dir = str(snap_cfg.get("dir", "snapshots"))
+    snap_ts = snap_cfg.get("ts", None) or [2.0/3.0, 1.0/3.0]
+    snap_ts = [float(x) for x in snap_ts]
+    snap_inc_in = bool(snap_cfg.get("include_input", True))
+    snap_inc_out = bool(snap_cfg.get("include_output", True))
+    snap_inc_gt = bool(snap_cfg.get("include_gt", True))
+    snap_save_strip = bool(snap_cfg.get("save_strip", True))
+    snap_save_ind = bool(snap_cfg.get("save_individual", True))
 
     print(f"[RUN] split={want or '(single)'} out={out_dir}")
     print(f"[RUN] steps={steps} sigma_T={sigma_T} val_infer={val_infer} "
           f"(stochastic={sample_stochastic}, clamp_known={sample_clamp_known}) "
           f"blend_valid={blend_valid} metric_missing_only={metric_missing_only}")
-    print("[CFG RAW] sample_cfg keys =", sorted(list(sample_cfg.keys())))
-    print("[CFG RAW] sample_cfg.sigma_T =", sample_cfg.get("sigma_T", None), "| train_cfg.sigma_T =", train_cfg.get("sigma_T", None))
-
+    if snap_enable:
+        print(f"[SNAP CFG] dir={snap_dir} ts={snap_ts} include_in={snap_inc_in} include_out={snap_inc_out} include_gt={snap_inc_gt} "
+              f"save_strip={snap_save_strip} save_individual={snap_save_ind}")
 
     # 4) Inference helpers
-    def infer_batch(inp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        inp: (B,C,H,W) in [0,1]
-          - expected channels: [noisy, mask, angle] if add_angle_channel else [noisy, mask]
-        returns:
-          pred01: (B,1,H,W) [0,1]
-          x1_img01: (B,1,H,W) [0,1]
-          mask01: (B,1,H,W) [0,1]
-        """
+    def infer_batch(inp: torch.Tensor,
+                    want_states: bool = False,
+                    snap_mid_ts: Optional[List[float]] = None):
         if add_angle_channel:
             if inp.shape[1] < 3:
                 raise RuntimeError("cfg.data.add_angle_channel=true but batch['inp'] has <3 channels.")
@@ -569,21 +678,38 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
             mask01 = inp[:, 1:2, ...].clamp(0.0, 1.0)
             angle01 = None
 
+        states01 = None
         if val_infer in ("sample", "bridge"):
-            # bridge conditional sampler (trainer-consistent)
             conds = mask01 if angle01 is None else torch.cat([mask01, angle01], dim=1)
-            x0_hat_m1 = sample_bridge_conditional(
-                net=net,
-                x1_img01=x1_img01.to(dev),
-                conds01=conds.to(dev),
-                steps=steps,
-                sigma_T=sigma_T,
-                stochastic=sample_stochastic,
-                clamp_known=sample_clamp_known,
-                cond_has_angle=cond_has_angle,
-            )
+
+            if want_states:
+                mid_ts = [float(x) for x in (snap_mid_ts or [])]
+                want_ts = [1.0] + mid_ts + [0.0]
+                x0_hat_m1, saved = sample_bridge_conditional(
+                    net=net,
+                    x1_img01=x1_img01.to(dev),
+                    conds01=conds.to(dev),
+                    steps=steps,
+                    sigma_T=sigma_T,
+                    stochastic=sample_stochastic,
+                    clamp_known=sample_clamp_known,
+                    cond_has_angle=cond_has_angle,
+                    save_ts=want_ts,
+                    return_states=True,
+                )
+                states01 = {float(tt): ((vv.clamp(-1, 1) + 1.0) * 0.5) for tt, vv in saved.items()}
+            else:
+                x0_hat_m1 = sample_bridge_conditional(
+                    net=net,
+                    x1_img01=x1_img01.to(dev),
+                    conds01=conds.to(dev),
+                    steps=steps,
+                    sigma_T=sigma_T,
+                    stochastic=sample_stochastic,
+                    clamp_known=sample_clamp_known,
+                    cond_has_angle=cond_has_angle,
+                )
         else:
-            # deterministic shared-eps sampler
             x1_img_m1 = x1_img01.to(dev) * 2.0 - 1.0
             x0_hat_m1 = sample_multi_step_shared_eps(
                 net=net,
@@ -597,6 +723,9 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
         pred01 = ((x0_hat_m1.clamp(-1, 1) + 1.0) * 0.5)
         if blend_valid:
             pred01 = pred01 * (1.0 - mask01.to(pred01.device)) + x1_img01.to(pred01.device) * mask01.to(pred01.device)
+
+        if want_states:
+            return pred01, x1_img01.to(pred01.device), mask01.to(pred01.device), states01
         return pred01, x1_img01.to(pred01.device), mask01.to(pred01.device)
 
     # 5) Run: pick_id or all
@@ -669,15 +798,22 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
                 noisy_lo_rows.append(nlo); noisy_hi_rows.append(nhi)
                 gt_lo_rows.append(glo); gt_hi_rows.append(ghi)
 
-                # raw restore if stats exist
-                if (glo is not None) and (ghi is not None) and (gt_i is not None):
-                    pr_raw = pred_i * (ghi - glo) + glo
-                    g_raw = gt_i * (ghi - glo) + glo
+                # ---------------- FIX: raw restore ----------------
+                # pred_raw: only needs gt_lo/gt_hi (DO NOT require gt_i)
+                if (glo is not None) and (ghi is not None):
+                    pr_raw = pred_i * (float(ghi) - float(glo)) + float(glo)
                 else:
-                    pr_raw, g_raw = None, None
+                    pr_raw = None
 
+                # gt_raw: needs gt + gt_lo/gt_hi
+                if (glo is not None) and (ghi is not None) and (gt_i is not None):
+                    g_raw = gt_i * (float(ghi) - float(glo)) + float(glo)
+                else:
+                    g_raw = None
+
+                # noisy_raw: needs noisy_lo/noisy_hi
                 if (nlo is not None) and (nhi is not None):
-                    n_raw = noz_i * (nhi - nlo) + nlo
+                    n_raw = noz_i * (float(nhi) - float(nlo)) + float(nlo)
                 else:
                     n_raw = None
 
@@ -705,16 +841,18 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
                 psnr_rows.append(ps)
                 ssim_rows.append(ss)
 
-                # pick_angle selection
+                # pick_angle selection (cache inp for snapshots)
                 if pick_angle is not None:
                     if isinstance(pick_angle, str) and pick_angle.lower().strip() == "mid":
-                        # handled after sorting
                         pass
                     else:
                         want_a = int(pick_angle)
                         diff = abs(int(ai) - want_a) if ai >= 0 else 9999
                         if best_one is None or diff < best_one[0]:
-                            best_one = (diff, dict(pred=pred_i, noisy=noz_i, gt=gt_i, mask=m_i, angle=ai))
+                            best_one = (diff, dict(
+                                pred=pred_i, noisy=noz_i, gt=gt_i, mask=m_i, angle=ai,
+                                inp_cpu=inp[i].detach().cpu(),
+                            ))
 
         if len(preds) == 0:
             raise RuntimeError(f"[ERROR] pick_id={pick_id} not found in split '{want}'.")
@@ -723,7 +861,7 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
         order = list(range(len(preds)))
         order.sort(key=lambda k: (angle_rows[k] < 0, angle_rows[k]))
 
-        def reorder(lst): 
+        def reorder(lst):
             return [lst[k] for k in order]
 
         preds = reorder(preds)
@@ -743,24 +881,23 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
         psnr_rows = reorder(psnr_rows)
         ssim_rows = reorder(ssim_rows)
 
-        # save volumes
+        # ---------------- FIX: save volumes (both tiff + npy) ----------------
         vol_pred = np.stack(preds, axis=0).astype(np.float32)
-        tiff.imwrite(os.path.join(out_dir, "pred_volume.tiff"), vol_pred, imagej=True)
-        np.save(os.path.join(out_dir, "pred_volume.npy"), vol_pred)
+        _save_stack_both(out_dir, "pred_volume", vol_pred)
 
         vol_nozy = np.stack(noisies, axis=0).astype(np.float32)
-        tiff.imwrite(os.path.join(out_dir, "noisy_volume.tiff"), vol_nozy, imagej=True)
+        _save_stack_both(out_dir, "noisy_volume", vol_nozy)
 
         if gts:
             vol_gt = np.stack(gts, axis=0).astype(np.float32)
-            tiff.imwrite(os.path.join(out_dir, "gt_volume.tiff"), vol_gt, imagej=True)
+            _save_stack_both(out_dir, "gt_volume", vol_gt)
 
-        if len(preds_raw) > 0 and all(x is not None for x in preds_raw):
-            vol_pr = np.stack(preds_raw, axis=0).astype(np.float32)
-            tiff.imwrite(os.path.join(out_dir, "pred_volume_raw.tiff"), vol_pr, imagej=True)
-            np.save(os.path.join(out_dir, "pred_volume_raw.npy"), vol_pr)
+        # raw volumes (only if complete)
+        _try_save_raw_stack(out_dir, "pred_volume_raw", preds_raw)
+        _try_save_raw_stack(out_dir, "noisy_volume_raw", noisies_raw)
+        _try_save_raw_stack(out_dir, "gt_volume_raw", gts_raw)
 
-        # save metrics.csv
+        # metrics.csv
         csv_path = os.path.join(out_dir, "metrics.csv")
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
@@ -782,44 +919,200 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
             if isinstance(pick_angle, str) and pick_angle.lower().strip() == "mid":
                 mid = len(preds) // 2
                 rec = dict(pred=preds[mid], noisy=noisies[mid], gt=gts[mid] if gts else None, angle=angle_rows[mid])
+                inp_cpu_for_snap = None
             else:
                 rec = best_one[1] if best_one is not None else None
                 if rec is None:
                     mid = len(preds) // 2
                     rec = dict(pred=preds[mid], noisy=noisies[mid], gt=gts[mid] if gts else None, angle=angle_rows[mid])
+                    inp_cpu_for_snap = None
+                else:
+                    inp_cpu_for_snap = rec.get("inp_cpu", None)
 
             ph, pw = rec["pred"].shape
             nn, gg = _match_to_pred_size((ph, pw), rec["noisy"], rec["gt"])
             aname = f"{int(rec['angle']):03d}" if rec["angle"] >= 0 else "xxx"
+            fig_name = f"id{pick_id}_a{aname}_step{steps}"
             save_quad_and_tiles(
                 nn, rec["pred"], gg,
                 out_dir,
-                f"id{pick_id}_a{aname}_step{steps}",
+                fig_name,
                 tiles_cfg,
                 use_gt_percentile_norm=True
             )
 
+            # snapshots (only for bridge/sample mode and numeric pick_angle)
+            if snap_enable and (val_infer in ("sample", "bridge")):
+                if inp_cpu_for_snap is None:
+                    print("[SNAP] skipped: no cached inp for selected rec (use numeric pick_angle, not 'mid').")
+                else:
+                    inp_one = inp_cpu_for_snap.unsqueeze(0).to(dev).float()
+                    pred_b, x1_b, _, states01 = infer_batch(inp_one, want_states=True, snap_mid_ts=snap_ts)
+
+                    imgs, tags = [], []
+                    if snap_inc_in:
+                        imgs.append(x1_b[0, 0].detach().cpu().numpy().astype(np.float32))
+                        tags.append("t=1.00_in")
+
+                    for tt in snap_ts:
+                        tt = float(tt)
+                        if states01 is not None and (tt in states01):
+                            imgs.append(states01[tt][0, 0].detach().cpu().numpy().astype(np.float32))
+                            tags.append(f"t={tt:.4f}")
+
+                    if snap_inc_out:
+                        imgs.append(pred_b[0, 0].detach().cpu().numpy().astype(np.float32))
+                        tags.append("t=0.00_out")
+
+                    gt_for_norm = rec.get("gt", None)
+                    if snap_inc_gt and (gt_for_norm is not None):
+                        imgs.append(np.asarray(gt_for_norm, dtype=np.float32))
+                        tags.append("GT")
+
+                    snap_name = f"{fig_name}_sig{sigma_T}"
+                    save_snapshots(
+                        out_dir=out_dir,
+                        subdir=snap_dir,
+                        base_name=snap_name,
+                        imgs01=imgs,
+                        tags=tags,
+                        gt01=gt_for_norm,
+                        use_gt_percentile_norm=True,
+                        save_strip=snap_save_strip,
+                        save_individual=snap_save_ind,
+                    )
+
     else:
-        # all data
+        # ---------------- FIX: all-mode also export recon3d-compatible outputs ----------------
         print(f"[MODE] process all data in split '{want}'")
-        preds_all = []
+
+        preds_all, noisies_all, gts_all = [], [], []
+        preds_raw_all, noisies_raw_all, gts_raw_all = [], [], []
+
+        id_rows, angle_rows, A_rows = [], [], []
+        noisy_lo_rows, noisy_hi_rows = [], []
+        gt_lo_rows, gt_hi_rows = [], []
+        psnr_rows, ssim_rows = [], []
 
         pbar = tqdm(loader, ncols=100)
         for batch in pbar:
             inp = batch["inp"].to(dev).float()
-            pred01, _, _ = infer_batch(inp)
+            pred01, x1_img01, mask01 = infer_batch(inp)
+
             pred_np = pred01.detach().cpu().numpy()
+            noisy_np = x1_img01.detach().cpu().numpy()
+            mask_np = mask01.detach().cpu().numpy()
+
+            has_gt = ("gt" in batch) and (batch["gt"] is not None)
+            gt_np = batch["gt"].detach().cpu().numpy() if has_gt else None
+
+            bid = batch.get("id", None)
+            if torch.is_tensor(bid):
+                ids = bid.detach().cpu().numpy().tolist()
+            elif isinstance(bid, (list, tuple, np.ndarray)):
+                ids = list(bid)
+            else:
+                ids = [bid] * pred_np.shape[0]
+
+            angles = batch.get("angle", [None] * pred_np.shape[0])
+            if torch.is_tensor(angles):
+                angles = angles.detach().cpu().numpy().tolist()
+
+            A_arr = batch.get("A", [None] * pred_np.shape[0])
+            if torch.is_tensor(A_arr):
+                A_arr = A_arr.detach().cpu().numpy().tolist()
 
             for i in range(pred_np.shape[0]):
-                preds_all.append(np.squeeze(pred_np[i, 0]).astype(np.float32))
+                pred_i = np.squeeze(pred_np[i, 0]).astype(np.float32)
+                noz_i = np.squeeze(noisy_np[i, 0]).astype(np.float32)
+                m_i = np.squeeze(mask_np[i, 0]).astype(np.float32)
+                gt_i = np.squeeze(gt_np[i, 0]).astype(np.float32) if has_gt else None
+
+                preds_all.append(pred_i)
+                noisies_all.append(noz_i)
+                if has_gt:
+                    gts_all.append(gt_i)
+
+                idi = ids[i]
+                ai = angles[i] if angles[i] is not None else -1
+                Ai = A_arr[i] if A_arr[i] is not None else 360
+
+                id_rows.append(idi if idi is not None else "")
+                angle_rows.append(ai)
+                A_rows.append(Ai)
+
+                nlo = _get_scalar_from_batch(batch, "noisy_lo", i)
+                nhi = _get_scalar_from_batch(batch, "noisy_hi", i)
+                glo = _get_scalar_from_batch(batch, "gt_lo", i)
+                ghi = _get_scalar_from_batch(batch, "gt_hi", i)
+                noisy_lo_rows.append(nlo); noisy_hi_rows.append(nhi)
+                gt_lo_rows.append(glo); gt_hi_rows.append(ghi)
+
+                # raw restore
+                if (glo is not None) and (ghi is not None):
+                    pr_raw = pred_i * (float(ghi) - float(glo)) + float(glo)
+                else:
+                    pr_raw = None
+                if (glo is not None) and (ghi is not None) and (gt_i is not None):
+                    g_raw = gt_i * (float(ghi) - float(glo)) + float(glo)
+                else:
+                    g_raw = None
+                if (nlo is not None) and (nhi is not None):
+                    n_raw = noz_i * (float(nhi) - float(nlo)) + float(nlo)
+                else:
+                    n_raw = None
+
+                preds_raw_all.append(pr_raw)
+                noisies_raw_all.append(n_raw)
+                gts_raw_all.append(g_raw)
+
+                # metrics
+                if has_gt and gt_i is not None:
+                    if metric_missing_only:
+                        miss = (1.0 - m_i).astype(np.float32)
+                        if miss.mean() > 1e-6:
+                            p_use = pred_i * miss
+                            g_use = gt_i * miss
+                        else:
+                            p_use, g_use = pred_i, gt_i
+                    else:
+                        p_use, g_use = pred_i, gt_i
+                    ps = _psnr01(p_use, g_use)
+                    ss = _ssim2d(p_use, g_use)
+                else:
+                    ps, ss = None, None
+                psnr_rows.append(ps)
+                ssim_rows.append(ss)
 
         if not preds_all:
             raise RuntimeError("[ERROR] No predictions generated.")
 
-        vol = np.stack(preds_all, axis=0).astype(np.float32)
-        tiff.imwrite(os.path.join(out_dir, "pred_volume_all.tiff"), vol, imagej=True)
-        np.save(os.path.join(out_dir, "pred_volume_all.npy"), vol)
+        vol_pred = np.stack(preds_all, axis=0).astype(np.float32)
+        _save_stack_both(out_dir, "pred_volume", vol_pred)
+
+        vol_nozy = np.stack(noisies_all, axis=0).astype(np.float32)
+        _save_stack_both(out_dir, "noisy_volume", vol_nozy)
+
+        if len(gts_all) == len(preds_all) and len(gts_all) > 0:
+            vol_gt = np.stack(gts_all, axis=0).astype(np.float32)
+            _save_stack_both(out_dir, "gt_volume", vol_gt)
+
+        _try_save_raw_stack(out_dir, "pred_volume_raw", preds_raw_all)
+        _try_save_raw_stack(out_dir, "noisy_volume_raw", noisies_raw_all)
+        _try_save_raw_stack(out_dir, "gt_volume_raw", gts_raw_all)
+
+        # metrics.csv (for recon3d angles)
+        csv_path = os.path.join(out_dir, "metrics.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["idx", "id", "angle", "A", "nlo", "nhi", "glo", "ghi", "PSNR", "SSIM"])
+            for idx, val in enumerate(zip(id_rows, angle_rows, A_rows,
+                                          noisy_lo_rows, noisy_hi_rows,
+                                          gt_lo_rows, gt_hi_rows,
+                                          psnr_rows, ssim_rows)):
+                w.writerow([idx] + [x if x is not None else "" for x in val])
         print(f"[DONE] Saved all predictions -> {out_dir}")
+        print(f"[DONE] Metrics -> {csv_path}")
 
 
 def main():

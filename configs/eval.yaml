@@ -89,10 +89,12 @@ recon3d:
   # save_dir: outputs/eval_pconv/recon3d
   # from_dir: outputs/i2sb_local_1step
   # save_dir: outputs/i2sb_local_1step/recon3d
+  from_dir: outputs/i2sb_local_multi
+  save_dir: outputs/i2sb_local_multi/recon3d
   # from_dir: outputs/pconv_ds2_L2L1_perc_edg
   # save_dir: outputs/pconv_ds2_L2L1_perc_edg/recon3d
-  from_dir: outputs/pconv_ds2_L2L1_perc_edg
-  save_dir: outputs/pconv_ds2_L2L1_perc_edg/recon3d
+  # from_dir: outputs/pconv_ds2_L2L1_perc_edg
+  # save_dir: outputs/pconv_ds2_L2L1_perc_edg/recon3d
   metrics_csv: metrics.csv
 
   # 若 CSV 里没有 A 列，用这个默认总帧数（否则忽略）

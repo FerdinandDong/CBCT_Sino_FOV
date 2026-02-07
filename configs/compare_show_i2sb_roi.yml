@@ -1,6 +1,7 @@
 # 全局变量区 
 # 定义根路径，后续用 {root} 引用，换路径只需改这一行
-root: "outputs/i2sb_local_1step"
+root: "outputs/i2sb_local_multi"
+# root: "outputs/i2sb_local_1step"
 # root: "outputs/pconv_ds2_L2L1_perc_edg_sty"
 
 tasks:
@@ -10,15 +11,15 @@ tasks:
     figsize: [14, 7]
     title_fontsize: 12
     
-    # [痛点 2 解决] 批量切片列表
+    # 批量切片列表
     slice_list: [128, 256, 384]
     
-    # [痛点 2 解决] 输出路径带 {slice} 占位符
+    # 输出路径带 {slice} 占位符
     out_path: "{root}/figs/compare_recon_z{slice}.png"
     
     # 标题也带占位符
     # suptitle: "PConv Reconstruction - Slice {slice}"
-    # suptitle: "I2SB-1step Reconstruction - Slice {slice}"
+    # suptitle: "I2SB Reconstruction - Slice {slice}"
     suptitle: "Various Reconstruction - Slice {slice}"
     slice_axis: 0
     # slice_index: 会被循环自动覆盖
@@ -46,7 +47,7 @@ tasks:
       cmap: magma
       colorbar: true
       
-      # 痛点 1 针对重建域，手动设置固定范围 700
+      # 针对重建域，手动设置固定范围 700
       heat_mode: fixed
       vmax: 900.0
 
@@ -88,7 +89,7 @@ tasks:
     
     out_path: "{root}/figs/compare_proj_a90.png"
     # suptitle: "PConv Projection - Angle 90"
-    # suptitle: "I2SB-1step Projection - Angle 90"
+    # suptitle: "I2SB Projection - Angle 90"
     suptitle: "Various Projection - Angle 90"
 
     paths:

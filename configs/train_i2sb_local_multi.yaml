@@ -69,9 +69,9 @@ train:
   ema_decay: 0.999
 
   # ---------------- ckpt/log ----------------
-  # ckpt_dir: checkpoints/i2sb_local_multi
-  # ckpt_prefix: i2sb_local_multi
-  # log_dir: logs/i2sb_local_multi
+  ckpt_dir: checkpoints/i2sb_local_multi
+  ckpt_prefix: i2sb_local_multi
+  log_dir: logs/i2sb_local_multi
   # ckpt_dir: checkpoints/i2sb_local_multi_ds8
   # ckpt_prefix: i2sb_local_multi_ds8
   # log_dir: logs/i2sb_local_multi_ds8
@@ -93,7 +93,7 @@ train:
   # cond_has_angle: true
 
   # ---------------- val ----------------
-  eval_every: 30
+  eval_every: 10
   val_max_batches: 8
 
   # best selection metric
@@ -117,7 +117,7 @@ train:
   # ---------------- perceptual loss ----------------
   # 需要 torchvision；不开就不会引入额外依赖
   use_percep: true
-  w_percep: 0.05
+  w_percep: 0.06    # 0.05
   percep_layers: [3, 8]
   percep_use_pretrained: true
   # "missing" | "valid" | "both"
@@ -154,9 +154,9 @@ train:
   start_epoch: 0
  
   # # 选项: 伪续训要避免覆盖原实验
-  # ckpt_prefix: i2sb_local_multi_ft1
-  # ckpt_dir: checkpoints/i2sb_local_multi_ft1
-  # log_dir: logs/i2sb_local_multi_ft1
+  ckpt_prefix: i2sb_local_multi_ft1
+  ckpt_dir: checkpoints/i2sb_local_multi_ft1
+  log_dir: logs/i2sb_local_multi_ft1
 
   # ---------------- inference / sampling for val/preview ----------------
   # 这些参数需要把它们加进 trainer 的 __init__ 并在 _eval_val/_dump_preview 中使用
