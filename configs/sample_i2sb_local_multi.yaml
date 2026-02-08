@@ -17,7 +17,7 @@ data:
   exclude_ids: []
   step: 1
   # downsample: 2
-  downsample: 2             #########先改成8 4 快速验证 最终会结果看齐2!!!!!!!!!!!!!!!!!
+  downsample: 2             #########先改成8 4 快速验证 最终会结果看齐2!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   truncate_left: 350
   truncate_right: 350
   mask_mode: fixed
@@ -47,7 +47,7 @@ train:
 
 sample:
   ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth
-  # ckpt: checkpoints/i2sb_local_multi_ft1/i2sb_local_multi_ft1_epoch3.pth
+  # ckpt: checkpoints/i2sb_local_multi_ft1/i2sb_local_multi_ft1_epoch120.pth
   # ckpt: checkpoints/i2sb_local_multi_ds4/i2sb_local_multi_ds4_epoch139.pth
   # ckpt: checkpoints/i2sb_local_multi_ds8/i2sb_local_multi_ds8_last.pth
   # ckpt: checkpoints/i2sb_local_multi/i2sb_local_multi_epoch129.pth
@@ -56,7 +56,8 @@ sample:
   # split: test
   split: temp_test  # 使用临时测试集
 
-  out_dir: outputs/i2sb_local_multi
+  # out_dir: outputs/i2sb_local_multi
+  out_dir: outputs/i2sb_local_multi_NFE1
   # out_dir: outputs/i2sb_local_multi_temp
   # out_dir: outputs/i2sb_local_multi_ds4_step1
   # out_dir: outputs/i2sb_local_multi_ds4_step5
@@ -67,7 +68,7 @@ sample:
   # out_dir: outputs/i2sb_local_multi_ds4_step20_sigmaT33
   # out_dir: outputs/i2sb_local_multi_ds4_step20_sigmaT100
   # out_dir: outputs/i2sb_local_multi_ds8both110perc005
-  steps: 20   # 采样步数 1 5 10 20 50
+  steps: 1   # 采样步数 1 5 10 20 50 通用20横向对比
   sigma_T: 1.0    # SDE相关显式写
   # sigma_T: 0.66   # SDE相关显式写
   # sigma_T: 0.33   # 显式写
@@ -81,9 +82,11 @@ sample:
     cmap: magma
 
   val_infer: sample
+  # val_infer: shared_eps # NFE测试机制 val_infer: shared_eps_noisy  # 直接用 noisy input 的 eps 采样，测试效果 在每个 t 用 x0_hat 推出同一个 ε_hat（或等价的共享噪声解释），再解析地把状态推进到 s，这能显著减少“中间态分布跑偏”
   sample_stochastic: false  # 走 ODE 还是 SDE!测试中间态0.33 0.66 开启 想想随即种子 需要复现实验 正常走ODE质量好
   seed: 0 # 固定随机种子以复现关于SDE相关实验结果
   sample_clamp_known: false # 强制已知区域不变
+  soft_clamp_valid: 0.0     # 新增：当 sample_clamp_known=false 时，在 valid 区域对 x 做 soft clamp（0=关闭，(0,1] 越大越贴近 x1）
   metric_missing_only: false # 只计算缺失区域
 
   snapshots:

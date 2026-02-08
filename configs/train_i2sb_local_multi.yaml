@@ -36,7 +36,7 @@ data:
   add_angle_channel: true
 
   # dataloader
-  batch_size: 8       # ds8 32    ds2 8
+  batch_size: 4       # ds8 32    ds2 8
   num_workers: 8
   pin_memory: true
   shuffle: false
@@ -117,7 +117,7 @@ train:
   # ---------------- perceptual loss ----------------
   # 需要 torchvision；不开就不会引入额外依赖
   use_percep: true
-  w_percep: 0.06    # 0.05
+  w_percep: 0.05    # 0.05
   percep_layers: [3, 8]
   percep_use_pretrained: true
   # "missing" | "valid" | "both"
@@ -127,7 +127,7 @@ train:
   # ---------------- resume ----------------
   # 当前 trainer 的 auto 逻辑是找 prefix_epoch*.pth（不包含 *_last.pth / *_best.pth）
   # 写死 last 路径是最稳的方式
-  
+
   #从头开始:
   # epochs: 150
   # resume: none
@@ -140,19 +140,21 @@ train:
   # resume_from: null
   # resume_from: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth
   # resume: last
-  # strict_load: true  
+  # strict_load: true
 # train:
 #   epochs: 300
 #   sched:
 #     type: cosine
 #     T_max: 300
-  
+
   # 伪续训/迁移 warm start：从指定 ckpt 继续训练
   epochs: 150
-  init_from: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth # 只要 init_from 生效，脚本会自动 resume=none 且 从 start_epoch 开始循环
+  init_from: checkpoints/i2sb_local_multi_ft1/i2sb_local_multi_ft1_epoch9.pth # 只要 init_from 生效，脚本会自动 resume=none 且 从 start_epoch 开始循环
+
+  # init_from: checkpoints/i2sb_local_multi/i2sb_local_multi_last.pth # 只要 init_from 生效，脚本会自动 resume=none 且 从 start_epoch 开始循环
   init_strict: true # 是否严格加载（默认 true）
   start_epoch: 0
- 
+
   # # 选项: 伪续训要避免覆盖原实验
   ckpt_prefix: i2sb_local_multi_ft1
   ckpt_dir: checkpoints/i2sb_local_multi_ft1
@@ -165,3 +167,23 @@ train:
   sample_steps: 5
   sample_stochastic: false     # 走 ODE 还是走 SDE!!!!!!!!!!!!!!!!!!!!!!!!!!
   sample_clamp_known: false    # 强制已知区域不变
+
+  # =====================================================================
+  # NEW: make NFE "more is better" (unroll / self-consistency training)
+  # 对应新 trainer: train_unroll/unroll_steps/.../unroll_warmup_epochs
+  # 建议：先 warmup 几个 epoch 再开 unroll（更稳）
+  # =====================================================================
+  train_unroll: true           # 开启 unroll consistency 训练（核心）
+  unroll_steps: 3              # K>=2，越大越慢；一般 2~4 就够用
+  unroll_stopgrad: true        # 中间状态 stop-grad（默认推荐，稳）
+  unroll_use_same_eps: true    # 用 eps_hat 构造确定性链（推荐）
+  unroll_t_mode: nested        # "nested" | "random_chain"
+  unroll_w: 0.5                # unroll loss 权重（建议 0.5~1.0 起步）
+  unroll_warmup_epochs: 10     # 前 10 个 epoch 只做 teacher forcing，之后再开 unroll
+
+  # =====================================================================
+  # NEW: optional stabilizer when sample_clamp_known=false
+  # clamp_known=false 做去噪时 valid 区可能漂移；soft_clamp_valid 可轻微回注入 x1
+  # 0=关闭；(0,1)=软回注入强度（建议先保持 0）
+  # =====================================================================
+  soft_clamp_valid: 0.0

@@ -120,6 +120,7 @@ def _instantiate_with_filtered_kwargs(cls, **kwargs):
 
 
 def _put_if_not_none(d: dict, k: str, v):
+    # 注意：False/0 也要保留，所以只判断 None
     if v is not None:
         d[k] = v
 
@@ -211,7 +212,7 @@ def main():
     ap.add_argument("--maximize_metric", type=str, default=None,
                     help="true/false（覆盖 cfg.train.maximize_metric；不填则交给 trainer 自动推断）")
 
-    # ---------------- NEW: warm start (weights-only) ----------------
+    # ---------------- warm start (weights-only) ----------------
     ap.add_argument("--init_from", type=str, default=None,
                     help="仅加载模型权重做伪续训/迁移训练（不恢复 optimizer/scheduler/scaler/EMA/best/global_step）")
     ap.add_argument("--init_strict", type=str, default="true",
@@ -420,6 +421,21 @@ def main():
     _put_if_not_none(trainer_kwargs, "sample_steps", sample_steps)
     _put_if_not_none(trainer_kwargs, "sample_stochastic", sample_stochastic)
     _put_if_not_none(trainer_kwargs, "sample_clamp_known", sample_clamp_known)
+
+    # ======================================================================
+    # NEW: unroll / NFE-related cfg passthrough (from train section)
+    # 这些必须传给 trainer.__init__ 才会生效
+    # ======================================================================
+    _put_if_not_none(trainer_kwargs, "train_unroll", tr.get("train_unroll", None))
+    _put_if_not_none(trainer_kwargs, "unroll_steps", tr.get("unroll_steps", None))
+    _put_if_not_none(trainer_kwargs, "unroll_stopgrad", tr.get("unroll_stopgrad", None))
+    _put_if_not_none(trainer_kwargs, "unroll_use_same_eps", tr.get("unroll_use_same_eps", None))
+    _put_if_not_none(trainer_kwargs, "unroll_t_mode", tr.get("unroll_t_mode", None))
+    _put_if_not_none(trainer_kwargs, "unroll_w", tr.get("unroll_w", None))
+    _put_if_not_none(trainer_kwargs, "unroll_warmup_epochs", tr.get("unroll_warmup_epochs", None))
+
+    # optional stabilizer for clamp_known=false case
+    _put_if_not_none(trainer_kwargs, "soft_clamp_valid", tr.get("soft_clamp_valid", None))
 
     trainer = _instantiate_with_filtered_kwargs(TrainerCls, **trainer_kwargs)
 

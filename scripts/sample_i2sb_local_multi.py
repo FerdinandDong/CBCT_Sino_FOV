@@ -28,6 +28,12 @@ NEW (minimal-intrusion):
         save_strip: true
         save_individual: true
 
+NEW (minimal-intrusion):
+- soft_clamp_valid (cfg.sample.soft_clamp_valid):
+  When sample_clamp_known=false, softly blends x towards x1 in valid region each step:
+    x <- x + a * mask * (x1 - x),  a in (0,1]
+  This helps stabilize sampling without hard clamping.
+
 FIX (minimal-intrusion, for legacy recon3d pipeline compatibility):
 - Always export noisy_volume.npy and gt_volume.npy (in addition to *.tiff)
 - Export *_volume_raw.(npy/tiff) when norm stats exist
@@ -446,15 +452,18 @@ def sample_bridge_conditional(
     stochastic: bool,
     clamp_known: bool,
     cond_has_angle: bool,
-    save_ts: Optional[List[float]] = None,       # NEW
-    return_states: bool = False,                 # NEW
+    soft_clamp_valid: float = 0.0,          # NEW
+    save_ts: Optional[List[float]] = None,  # NEW
+    return_states: bool = False,            # NEW
 ):
     """
     Bridge sampler consistent with trainer._i2sb_sample().
 
     NEW:
+      - soft_clamp_valid: when clamp_known=false, softly clamps valid region:
+          x <- x + a * mask * (x1 - x) , a in (0,1]
       - save_ts: list of t in [0,1] to snapshot (nearest grid point on linspace(1,0,steps+1))
-      - return_states: if True return (x0_hat, saved_dict) where saved_dict maps requested tt -> x_tt
+      - return_states: if True return (x_T, saved_dict) where saved_dict maps requested tt -> x_tt
     """
     device = x1_img01.device
     B, _, H, W = x1_img01.shape
@@ -480,6 +489,9 @@ def sample_bridge_conditional(
     mask = conds[:, 0:1, ...].clamp(0.0, 1.0)
     eps = 1e-6
     sigma2 = float(sigma_T) ** 2
+
+    a_soft = float(soft_clamp_valid) if soft_clamp_valid is not None else 0.0
+    a_soft = max(0.0, min(1.0, a_soft))
 
     ts = torch.linspace(1.0, 0.0, steps + 1, device=device, dtype=torch.float32)
     x = x1m  # init at t=1
@@ -530,6 +542,11 @@ def sample_bridge_conditional(
             else:
                 x = mean
 
+        # soft clamp (only when hard clamp is disabled)
+        if (not clamp_known) and (a_soft > 0.0):
+            x = x + a_soft * mask * (x1m - x)
+
+        # hard clamp
         if clamp_known:
             x = mask * x1m + (1.0 - mask) * x
 
@@ -638,6 +655,7 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
     val_infer = str(sample_cfg.get("val_infer", "shared_eps")).lower().strip()
     sample_stochastic = bool(sample_cfg.get("sample_stochastic", False))
     sample_clamp_known = bool(sample_cfg.get("sample_clamp_known", True))
+    soft_clamp_valid = float(sample_cfg.get("soft_clamp_valid", 0.0) or 0.0)
 
     add_angle_channel = bool((cfg.get("data", {}) or {}).get("add_angle_channel", True))
     cond_has_angle = add_angle_channel
@@ -655,7 +673,7 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
 
     print(f"[RUN] split={want or '(single)'} out={out_dir}")
     print(f"[RUN] steps={steps} sigma_T={sigma_T} val_infer={val_infer} "
-          f"(stochastic={sample_stochastic}, clamp_known={sample_clamp_known}) "
+          f"(stochastic={sample_stochastic}, clamp_known={sample_clamp_known}, soft_clamp_valid={soft_clamp_valid}) "
           f"blend_valid={blend_valid} metric_missing_only={metric_missing_only}")
     if snap_enable:
         print(f"[SNAP CFG] dir={snap_dir} ts={snap_ts} include_in={snap_inc_in} include_out={snap_inc_out} include_gt={snap_inc_gt} "
@@ -679,7 +697,9 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
             angle01 = None
 
         states01 = None
+
         if val_infer in ("sample", "bridge"):
+            # --- Bridge sampler (trainer-aligned), deterministic when sample_stochastic=False ---
             conds = mask01 if angle01 is None else torch.cat([mask01, angle01], dim=1)
 
             if want_states:
@@ -694,6 +714,7 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
                     stochastic=sample_stochastic,
                     clamp_known=sample_clamp_known,
                     cond_has_angle=cond_has_angle,
+                    soft_clamp_valid=soft_clamp_valid,
                     save_ts=want_ts,
                     return_states=True,
                 )
@@ -708,8 +729,11 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
                     stochastic=sample_stochastic,
                     clamp_known=sample_clamp_known,
                     cond_has_angle=cond_has_angle,
+                    soft_clamp_valid=soft_clamp_valid,
                 )
-        else:
+
+        elif val_infer in ("shared_eps", "eps"):
+            # --- Deterministic shared-eps sampler ---
             x1_img_m1 = x1_img01.to(dev) * 2.0 - 1.0
             x0_hat_m1 = sample_multi_step_shared_eps(
                 net=net,
@@ -719,6 +743,8 @@ def run(cfg_path: str, ckpt: Optional[str] = None, out: Optional[str] = None):
                 steps=steps,
                 sigma_T=sigma_T,
             )
+        else:
+            raise RuntimeError(f"[sample_i2sb_local_multi] Unknown val_infer='{val_infer}'. Use 'sample/bridge' or 'shared_eps'.")
 
         pred01 = ((x0_hat_m1.clamp(-1, 1) + 1.0) * 0.5)
         if blend_valid:

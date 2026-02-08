@@ -1,6 +1,7 @@
 # 全局变量区 
 # 定义根路径，后续用 {root} 引用，换路径只需改这一行
-root: "outputs/i2sb_local_multi"
+# root: "outputs/i2sb_local_multi"
+root: "outputs/i2sb_local_multi_NFE50"
 # root: "outputs/i2sb_local_1step"
 # root: "outputs/pconv_ds2_L2L1_perc_edg_sty"
 
