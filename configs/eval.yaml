@@ -91,8 +91,8 @@ recon3d:
   # save_dir: outputs/i2sb_local_1step/recon3d
   # from_dir: outputs/i2sb_local_multi
   # save_dir: outputs/i2sb_local_multi/recon3d
-  from_dir: outputs/i2sb_local_multi_NFE50
-  save_dir: outputs/i2sb_local_multi_NFE50/recon3d
+  from_dir: outputs/i2sb_local_multi_NFE2
+  save_dir: outputs/i2sb_local_multi_NFE2/recon3d
   # from_dir: outputs/pconv_ds2_L2L1_perc_edg
   # save_dir: outputs/pconv_ds2_L2L1_perc_edg/recon3d
   # from_dir: outputs/pconv_ds2_L2L1_perc_edg

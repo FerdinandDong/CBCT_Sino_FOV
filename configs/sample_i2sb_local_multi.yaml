@@ -57,7 +57,7 @@ sample:
   split: temp_test  # 使用临时测试集
 
   # out_dir: outputs/i2sb_local_multi
-  out_dir: outputs/i2sb_local_multi_NFE1
+  out_dir: outputs/i2sb_local_multi_NFE2
   # out_dir: outputs/i2sb_local_multi_temp
   # out_dir: outputs/i2sb_local_multi_ds4_step1
   # out_dir: outputs/i2sb_local_multi_ds4_step5
@@ -68,7 +68,7 @@ sample:
   # out_dir: outputs/i2sb_local_multi_ds4_step20_sigmaT33
   # out_dir: outputs/i2sb_local_multi_ds4_step20_sigmaT100
   # out_dir: outputs/i2sb_local_multi_ds8both110perc005
-  steps: 1   # 采样步数 1 5 10 20 50 通用20横向对比
+  steps: 2   # 采样步数 1 5 10 20 50 通用20横向对比
   sigma_T: 1.0    # SDE相关显式写
   # sigma_T: 0.66   # SDE相关显式写
   # sigma_T: 0.33   # 显式写

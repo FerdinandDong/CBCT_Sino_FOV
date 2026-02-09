@@ -4,7 +4,7 @@
 import os, csv, sys
 import glob, re
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -354,7 +354,7 @@ class I2SBLocalTrainer:
         unroll_w: float = 1.0,
         unroll_warmup_epochs: int = 0,
 
-        # --- NEW (fix OOM): unroll forward uses gradient checkpointing by default ---
+        # --- NEW: unroll forward uses checkpointing (default True, cfg 不用加也能跑) ---
         unroll_use_checkpoint: bool = True,
 
         # --- sampling stabilization when clamp_known=false (optional) ---
@@ -434,7 +434,7 @@ class I2SBLocalTrainer:
         self.unroll_w = float(unroll_w)
         self.unroll_warmup_epochs = int(unroll_warmup_epochs)
 
-        # NEW: checkpoint unroll forwards (default True to prevent epoch10 OOM)
+        # NEW
         self.unroll_use_checkpoint = bool(unroll_use_checkpoint)
 
         # soft clamp in sampler (optional)
@@ -518,7 +518,6 @@ class I2SBLocalTrainer:
             wmap_p  = _resize_max_hw(wmap,  self.percep_max_hw)
 
             if self.device.type == "cuda":
-                # avoid FutureWarning on torch.cuda.amp.autocast
                 try:
                     with torch.amp.autocast("cuda", enabled=False):
                         loss_perc = self.percep(x_hat_p, x_ref_p, weight_map=wmap_p)
@@ -532,15 +531,29 @@ class I2SBLocalTrainer:
 
         return loss
 
-    # --------- I2SB 训练 Loss (Random t bridge) + optional unroll consistency ---------
-    def _step_loss(self, model: nn.Module, batch) -> torch.Tensor:
+    # ---------------- memory-safe unroll helpers ----------------
+    def _ckpt_forward(self, model: nn.Module, net_in: torch.Tensor) -> torch.Tensor:
+        """Checkpointed forward for unroll (saves activation memory)."""
+        if (not self.unroll_use_checkpoint) or (self.device.type != "cuda"):
+            return model(net_in)
+
+        def _fw(x):
+            return model(x)
+
+        # ensure checkpoint sees grad path
+        if not net_in.requires_grad:
+            net_in = net_in.requires_grad_(True)
+
+        try:
+            return checkpoint(_fw, net_in, use_reentrant=False)
+        except TypeError:
+            return checkpoint(_fw, net_in)
+
+    def _tf_loss_and_cache(self, model: nn.Module, batch):
         """
-        Bridge training (I2SB-style), network predicts x0 in [-1,1]
-        - x0: GT clean projection in [0,1]
-        - x1_img: degraded/truncated/noisy projection in [0,1]
-        - conds: mask(+angle) in [0,1]
-        - xt = (1-t)*x0 + t*x1 + sigma_T*sqrt(t(1-t))*eps
-        - net input: [xt, x1_img, conds, t_map]
+        Teacher-forcing forward:
+          returns (loss_tf, cache_for_unroll_detached)
+        cache is detached so unroll won't keep TF graph alive.
         """
         x0 = batch["gt"].to(self.device).float()
         x1 = batch["inp"].to(self.device).float()
@@ -549,11 +562,9 @@ class I2SBLocalTrainer:
         x1_img = x1[:, 0:1, ...]
         conds  = x1[:, 1:,  ...]
 
-        # images -> [-1,1]
         x0_m1  = x0 * 2.0 - 1.0
         x1m_m1 = x1_img * 2.0 - 1.0
 
-        # pad to UNet factor
         factor = self._unet_factor(model)
         Ht = _ceil_to(H, factor)
         Wt = _ceil_to(W, factor)
@@ -564,18 +575,15 @@ class I2SBLocalTrainer:
             x1m_m1 = F.pad(x1m_m1, pad, mode="reflect")
             conds  = _pad_conds(conds, pad, has_angle=self.cond_has_angle)
 
-        # sample t and build bridge xt (teacher-forced)
         t = torch.rand(B, 1, 1, 1, device=self.device) * (1.0 - self.t0) + self.t0
         noise = torch.randn_like(x0_m1)
         std = self._bridge_std(t)
         xt = (1.0 - t) * x0_m1 + t * x1m_m1 + std * noise
 
-        # net input @ t
         t_map = t.expand(B, 1, Ht, Wt)
         net_in = torch.cat([xt, x1m_m1, conds, t_map], dim=1)
         x0_hat = model(net_in)
 
-        # crop for loss reference
         if (Ht, Wt) != (H, W):
             x0_hat_crop = x0_hat[..., :H, :W]
             x0_ref = x0_m1[..., :H, :W]
@@ -585,72 +593,148 @@ class I2SBLocalTrainer:
             x0_ref = x0_m1
             conds_crop = conds
 
-        # base teacher-forcing objective (keep perceptual here if enabled)
+        loss_tf = self._masked_loss(x0_hat_crop, x0_ref, conds_crop, use_percep=None)
+
+        cache = dict(
+            B=B, H=H, W=W, Ht=Ht, Wt=Wt,
+            # detached states for unroll
+            xt=xt.detach(),
+            t=t.detach(),
+            x0_hat_prev=x0_hat.detach(),
+            x1m_m1=x1m_m1.detach(),
+            conds=conds.detach(),
+            x0_ref=x0_ref.detach(),
+            conds_crop=conds_crop.detach(),
+        )
+        return loss_tf, cache
+
+    def _unroll_one_step_loss(self, model: nn.Module, cache, x_prev: torch.Tensor, t_prev: torch.Tensor, x0_hat_prev_det: torch.Tensor):
+        """
+        One unroll step (stopgrad mode only):
+          - sample t_next < t_prev
+          - build x_next from eps_hat (all detached)
+          - forward @ t_next
+          - return loss_u (percep forced OFF), and next detached states
+        """
+        B = cache["B"]; H = cache["H"]; W = cache["W"]; Ht = cache["Ht"]; Wt = cache["Wt"]
+        x1m_m1 = cache["x1m_m1"]
+        conds  = cache["conds"]
+        x0_ref = cache["x0_ref"]
+        conds_crop = cache["conds_crop"]
+
+        if self.unroll_t_mode == "nested":
+            u = torch.rand_like(t_prev)
+            t_next = (t_prev * u).clamp_min(self.t0)
+        else:
+            t_next = (torch.rand_like(t_prev) * (t_prev - self.t0) + self.t0).clamp_min(self.t0)
+
+        # stopgrad path
+        x0_for_eps = x0_hat_prev_det
+        x_for_eps  = x_prev
+
+        eps_hat  = self._eps_from_xt(x_for_eps, x0_for_eps, x1m_m1, t_prev)
+        std_next = self._bridge_std(t_next)
+        x_next   = (1.0 - t_next) * x0_for_eps + t_next * x1m_m1 + std_next * eps_hat
+        x_next   = x_next.detach()  # prevent graph chaining
+
+        t_map_next = t_next.expand(B, 1, Ht, Wt)
+        net_in_next = torch.cat([x_next, x1m_m1, conds, t_map_next], dim=1)
+
+        x0_hat_next = self._ckpt_forward(model, net_in_next)
+
+        if (Ht, Wt) != (H, W):
+            x0_hat_next_crop = x0_hat_next[..., :H, :W]
+        else:
+            x0_hat_next_crop = x0_hat_next
+
+        loss_u = self._masked_loss(x0_hat_next_crop, x0_ref, conds_crop, use_percep=False)
+        return loss_u, x_next, t_next.detach(), x0_hat_next.detach()
+
+    # --------- I2SB 训练 Loss (Random t bridge) ---------
+    def _step_loss(self, model: nn.Module, batch) -> torch.Tensor:
+        """
+        Base teacher-forcing bridge loss.
+        NOTE:
+          - if unroll_stopgrad=True, unroll is done in fit() (memory-safe), NOT here.
+          - if unroll_stopgrad=False, keep legacy unroll here (may be memory-heavy).
+        """
+        x0 = batch["gt"].to(self.device).float()
+        x1 = batch["inp"].to(self.device).float()
+        B, C, H, W = x1.shape
+
+        x1_img = x1[:, 0:1, ...]
+        conds  = x1[:, 1:,  ...]
+
+        x0_m1  = x0 * 2.0 - 1.0
+        x1m_m1 = x1_img * 2.0 - 1.0
+
+        factor = self._unet_factor(model)
+        Ht = _ceil_to(H, factor)
+        Wt = _ceil_to(W, factor)
+
+        if (Ht, Wt) != (H, W):
+            pad = (0, Wt - W, 0, Ht - H)
+            x0_m1  = F.pad(x0_m1,  pad, mode="reflect")
+            x1m_m1 = F.pad(x1m_m1, pad, mode="reflect")
+            conds  = _pad_conds(conds, pad, has_angle=self.cond_has_angle)
+
+        t = torch.rand(B, 1, 1, 1, device=self.device) * (1.0 - self.t0) + self.t0
+        noise = torch.randn_like(x0_m1)
+        std = self._bridge_std(t)
+        xt = (1.0 - t) * x0_m1 + t * x1m_m1 + std * noise
+
+        t_map = t.expand(B, 1, Ht, Wt)
+        net_in = torch.cat([xt, x1m_m1, conds, t_map], dim=1)
+        x0_hat = model(net_in)
+
+        if (Ht, Wt) != (H, W):
+            x0_hat_crop = x0_hat[..., :H, :W]
+            x0_ref = x0_m1[..., :H, :W]
+            conds_crop = conds[..., :H, :W]
+        else:
+            x0_hat_crop = x0_hat
+            x0_ref = x0_m1
+            conds_crop = conds
+
         loss_tf = self._masked_loss(x0_hat_crop, x0_ref, conds_crop, use_percep=None)
         loss = loss_tf
 
-        # ---------------- Unroll / self-consistency training ----------------
-        # Fix OOM: unroll loss 默认不算 perceptual；unroll forward 默认 checkpoint。
-        if self.train_unroll and (self.unroll_w > 0.0):
+        # legacy unroll only when stopgrad=False (graph-through chain)
+        if self.train_unroll and (self.unroll_w > 0.0) and (not self.unroll_stopgrad):
             if int(getattr(self, "_cur_epoch", 0)) >= int(self.unroll_warmup_epochs):
                 K = int(self.unroll_steps)
-
                 x = xt
                 t_prev = t
                 x0_hat_prev = x0_hat
-
                 loss_unroll = x0_hat.new_tensor(0.0)
 
-                def _fw(inp):
-                    return model(inp)
-
                 for j in range(1, K):
-                    # sample next time t_next < t_prev
                     if self.unroll_t_mode == "nested":
                         u = torch.rand_like(t_prev)
                         t_next = (t_prev * u).clamp_min(self.t0)
                     else:
                         t_next = (torch.rand_like(t_prev) * (t_prev - self.t0) + self.t0).clamp_min(self.t0)
 
-                    # stopgrad optional
-                    if self.unroll_stopgrad:
-                        x0_for_eps = x0_hat_prev.detach()
-                        x_for_eps = x.detach() if self.unroll_use_same_eps else x
+                    if self.unroll_use_same_eps:
+                        eps_hat = self._eps_from_xt(x, x0_hat_prev, x1m_m1, t_prev)
                     else:
-                        x0_for_eps = x0_hat_prev
-                        x_for_eps = x
+                        eps_hat = self._eps_from_xt(x.detach(), x0_hat_prev, x1m_m1, t_prev)
 
-                    # estimate eps_hat and synthesize new state at t_next
-                    eps_hat = self._eps_from_xt(x_for_eps, x0_for_eps, x1m_m1, t_prev)
                     std_next = self._bridge_std(t_next)
-                    x_next = (1.0 - t_next) * x0_for_eps + t_next * x1m_m1 + std_next * eps_hat
+                    x_next = (1.0 - t_next) * x0_hat_prev + t_next * x1m_m1 + std_next * eps_hat
 
-                    # forward model @ t_next (checkpoint to save memory)
                     t_map_next = t_next.expand(B, 1, Ht, Wt)
                     net_in_next = torch.cat([x_next, x1m_m1, conds, t_map_next], dim=1)
+                    x0_hat_next = model(net_in_next)
 
-                    if self.unroll_use_checkpoint and self.device.type == "cuda":
-                        # checkpoint needs at least one input requires_grad=True to propagate grads to params
-                        net_in_next = net_in_next.requires_grad_(True)
-                        try:
-                            x0_hat_next = checkpoint(_fw, net_in_next, use_reentrant=False)
-                        except TypeError:
-                            x0_hat_next = checkpoint(_fw, net_in_next)
-                    else:
-                        x0_hat_next = model(net_in_next)
-
-                    # crop and compute loss vs true x0
                     if (Ht, Wt) != (H, W):
                         x0_hat_next_crop = x0_hat_next[..., :H, :W]
                     else:
                         x0_hat_next_crop = x0_hat_next
 
-                    # IMPORTANT: unroll loss force-disable perceptual to prevent Kx VGG overhead
-                    loss_unroll = loss_unroll + self._masked_loss(
-                        x0_hat_next_crop, x0_ref, conds_crop, use_percep=False
-                    )
+                    # perceptual off in unroll
+                    loss_unroll = loss_unroll + self._masked_loss(x0_hat_next_crop, x0_ref, conds_crop, use_percep=False)
 
-                    # advance
                     x = x_next
                     t_prev = t_next
                     x0_hat_prev = x0_hat_next
@@ -681,10 +765,6 @@ class I2SBLocalTrainer:
         sched: Optional[optim.lr_scheduler._LRScheduler] = None,
         scaler: Optional[torch.cuda.amp.GradScaler] = None,
     ):
-        """
-        新版 ckpt：包含 model/epoch + optimizer/scheduler/scaler/ema/global_step/best
-        兼容旧版：只存 state_dict/epoch 的 ckpt 也能 load。
-        """
         payload = {
             "epoch": int(epoch),
             "state_dict": model.state_dict(),
@@ -706,7 +786,6 @@ class I2SBLocalTrainer:
             except Exception:
                 pass
 
-        # EMA shadow
         if hasattr(self, "ema") and self.ema is not None:
             try:
                 payload["ema_decay"] = float(self.ema.decay)
@@ -922,6 +1001,7 @@ class I2SBLocalTrainer:
             if (max_batches is not None) and (max_batches > 0) and (bcount > max_batches):
                 break
 
+            # val loss: use _step_loss (stopgrad=True 时这里就是 TF-only)
             loss = self._step_loss(model, batch).item()
             s_loss += loss
 
@@ -931,6 +1011,7 @@ class I2SBLocalTrainer:
 
             x1_img = x1[:, 0:1, ...]
             conds = x1[:, 1:, ...]
+
             if self.val_infer == "sample":
                 pred_m1 = self._i2sb_sample(
                     model,
@@ -1083,7 +1164,6 @@ class I2SBLocalTrainer:
 
         model.to(self.device).train()
 
-        # init EMA/opt/sched/scaler
         self.ema = EMA(model, decay=self.ema_decay)
         opt = optim.AdamW(model.parameters(), lr=self.lr)
 
@@ -1103,13 +1183,11 @@ class I2SBLocalTrainer:
 
         n_batches = len(train_loader)
 
-        # init states (then try resume to overwrite)
         if not hasattr(self, "global_step"):
             self.global_step = 0
         self._init_best_score()
         self.best_epoch = None
 
-        # resume
         preset_start = int(getattr(self, "start_epoch", 1) or 1)
         if self.resume in ("none", "false", "0") and preset_start > 1:
             start_epoch = preset_start
@@ -1134,27 +1212,75 @@ class I2SBLocalTrainer:
                 disable=disable_tqdm
             )
 
+            do_mem_safe_unroll = (
+                self.train_unroll and (self.unroll_w > 0.0)
+                and self.unroll_stopgrad
+                and (int(epoch) >= int(self.unroll_warmup_epochs))
+                and (int(self.unroll_steps) >= 2)
+            )
+
             for it, batch in enumerate(pbar, 1):
                 opt.zero_grad(set_to_none=True)
-                with _autocast_ctx(enabled=use_amp, device_type="cuda"):
-                    loss = self._step_loss(model, batch)
 
-                scaler.scale(loss).backward()
-                scaler.step(opt)
-                scaler.update()
-                self.ema.update(model)
+                if do_mem_safe_unroll:
+                    # -------- memory-safe unroll: TF backward first, then unroll each step backward --------
+                    with _autocast_ctx(enabled=use_amp, device_type="cuda"):
+                        loss_tf, cache = self._tf_loss_and_cache(model, batch)
 
-                running += loss.item()
+                    scaler.scale(loss_tf).backward()
+
+                    K = int(self.unroll_steps)
+                    w_each = float(self.unroll_w) / float(max(1, (K - 1)))
+
+                    x_prev = cache["xt"]
+                    t_prev = cache["t"]
+                    x0_hat_prev = cache["x0_hat_prev"]
+
+                    sum_u = 0.0
+                    for _ in range(1, K):
+                        with _autocast_ctx(enabled=use_amp, device_type="cuda"):
+                            loss_u, x_prev, t_prev, x0_hat_prev = self._unroll_one_step_loss(
+                                model, cache, x_prev, t_prev, x0_hat_prev
+                            )
+
+                        sum_u += float(loss_u.detach().item())
+                        scaler.scale(loss_u * w_each).backward()
+
+                    loss_for_log = loss_tf.detach() + loss_tf.new_tensor(sum_u * w_each)
+
+                    # release big refs
+                    del cache, x_prev, t_prev, x0_hat_prev, loss_u
+
+                    scaler.step(opt)
+                    scaler.update()
+                    self.ema.update(model)
+
+                    running += float(loss_for_log.item())
+                    cur_loss_val = float(loss_for_log.item())
+
+                else:
+                    # -------- normal path (no unroll, or legacy stopgrad=False unroll inside _step_loss) --------
+                    with _autocast_ctx(enabled=use_amp, device_type="cuda"):
+                        loss = self._step_loss(model, batch)
+
+                    scaler.scale(loss).backward()
+                    scaler.step(opt)
+                    scaler.update()
+                    self.ema.update(model)
+
+                    running += float(loss.item())
+                    cur_loss_val = float(loss.item())
+
                 self.global_step += 1
 
                 lr_now = opt.param_groups[0]["lr"]
                 avg = running / it
 
                 if not disable_tqdm:
-                    pbar.set_postfix(loss=f"{loss.item():.4f}", avg=f"{avg:.4f}", lr=f"{lr_now:.2e}")
+                    pbar.set_postfix(loss=f"{cur_loss_val:.4f}", avg=f"{avg:.4f}", lr=f"{lr_now:.2e}")
 
                 if self.log_interval > 0 and (it % self.log_interval == 0):
-                    print(f"[Epoch {epoch} | Step {it}/{n_batches}] loss={loss.item():.4f} lr={lr_now:.2e}", flush=True)
+                    print(f"[Epoch {epoch} | Step {it}/{n_batches}] loss={cur_loss_val:.4f} lr={lr_now:.2e}", flush=True)
 
             if sched is not None:
                 sched.step()
@@ -1162,7 +1288,6 @@ class I2SBLocalTrainer:
             epoch_avg = running / max(1, n_batches)
             print(f"Epoch {epoch} mean loss: {epoch_avg:.4f} | lr={opt.param_groups[0]['lr']:.8e}", flush=True)
 
-            # ---- val control: only run every eval_every epochs ----
             do_val = (val_loader is not None) and (self.eval_every > 0) and ((epoch % self.eval_every) == 0)
 
             if do_val:
